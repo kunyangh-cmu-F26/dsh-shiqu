@@ -22,9 +22,10 @@ window.__ModuleLoader__.load({
     const stack = { display: 'grid', gap: 16, maxWidth: 760, margin: '0 auto', padding: '12px 4px' }
     const card = { border: '1px solid var(--border, #8885)', borderRadius: 10, padding: 14, display: 'grid', gap: 10 }
 
-    async function api(path, body) {
+    async function api(path, body, panelToken) {
       const response = await fetch(prefix + path, body === undefined ? { cache: 'no-store' } : {
-        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-dsh-shiqu-panel-token': panelToken },
+        body: JSON.stringify(body),
       })
       const result = await response.json()
       if (!response.ok) throw new Error(result.error)
@@ -45,6 +46,7 @@ window.__ModuleLoader__.load({
       const [sessions, setSessions] = useState([])
       const [notice, setNotice] = useState('')
       const [working, setWorking] = useState(false)
+      const [researching, setResearching] = useState(false)
       const [subscriptionType, setSubscriptionType] = useState('github')
       const [subscriptionValue, setSubscriptionValue] = useState('')
 
@@ -105,20 +107,28 @@ window.__ModuleLoader__.load({
       }
 
       if (!snapshot || !settings) return h('p', { role: 'status' }, notice || '正在加载拾趣…')
+      const post = (path, body) => api(path, body, snapshot.panelToken)
       const last = snapshot.latest
       const knownIds = new Set(sessions.map(session => session.id))
       const allSessions = [...sessions, ...settings.sessions.filter(id => !knownIds.has(id)).map(id => ({ id, title: '暂不可见' }))]
       const check = (label, key) => field(label, { type: 'checkbox', checked: settings[key],
         onChange: event => update(key, event.target.checked) })
       const save = () => act(async () => {
-        await api('/settings', settings)
+        await post('/settings', settings)
         setSettings((await api('/state')).settings)
         return '设置已保存。'
       })
-      const run = () => act(async () => {
-        const { outcome } = await api('/run', {})
-        return statuses[outcome] ?? outcome
-      })
+      async function run() {
+        setResearching(true)
+        try {
+          await act(async () => {
+            const { outcome } = await post('/run', {})
+            return statuses[outcome] ?? outcome
+          })
+        } finally {
+          setResearching(false)
+        }
+      }
 
       return h('div', { style: stack },
         h('section', { style: card, 'aria-label': '运行状态' },
@@ -130,7 +140,8 @@ window.__ModuleLoader__.load({
           last?.details.filtered > 0 && h('div', null, '被拦截的来源 · ' + last.details.filtered),
           last?.details.failed > 0 && h('div', null, '读取失败的来源 · ' + last.details.failed),
           last?.details.unreadable > 0 && h('div', null, '暂时读不到的已选会话 · ' + last.details.unreadable),
-          h('div', { style: row }, button('立即研究一轮', run, working || snapshot.busy),
+          h('div', { style: row }, button(researching || snapshot.busy ? '正在研究…' : '立即研究一轮',
+            run, working || snapshot.busy),
             h('span', { role: 'status', 'aria-live': 'polite' }, notice))),
         h('section', { style: card, 'aria-label': '设置' },
           h('strong', null, '设置'),
@@ -171,9 +182,9 @@ window.__ModuleLoader__.load({
               item.published, new Date(item.added).toLocaleDateString()].filter(Boolean).join(' · ')),
             h('div', null, item.summary), h('small', null, '收录理由 · ' + item.reason),
             h('div', { style: row },
-              button('有用', () => act(() => api('/feedback', { id: item.id, value: item.feedback === 1 ? 0 : 1 }).then(() => '反馈已保存。')),
+              button('有用', () => act(() => post('/feedback', { id: item.id, value: item.feedback === 1 ? 0 : 1 }).then(() => '反馈已保存。')),
                 working, item.feedback === 1),
-              button('少找这类', () => act(() => api('/feedback', { id: item.id, value: item.feedback === -1 ? 0 : -1 }).then(() => '反馈已保存。')),
+              button('少找这类', () => act(() => post('/feedback', { id: item.id, value: item.feedback === -1 ? 0 : -1 }).then(() => '反馈已保存。')),
                 working, item.feedback === -1)))) : h('div', null, '收录的资料会出现在这里。')))
     }
 

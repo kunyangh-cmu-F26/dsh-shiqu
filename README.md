@@ -4,13 +4,19 @@
 
 ## 安装
 
-已验证的组合为 DSH **0.2.2-rc.1**、[记忆宫殿 dsh-engram **0.13.10**](https://github.com/kenz1117/dsh-engram) 和拾趣 **0.1.0**。运行环境要求 Node.js 24.9 或以上。默认面板在本机 DSH Web 页面中使用。
+拾趣 **0.1.2** 已在 DSH **0.2.1-rc.3** 和 **0.2.2-rc.1** 的 Desktop profile 中使用 Desktop 转发代码验证保存设置、手动研究和写入 [记忆宫殿 dsh-engram **0.13.10**](https://github.com/kenz1117/dsh-engram)。运行环境要求 Node.js 24.9 或以上。面板可从本机 Desktop 或 Web 打开。
 
-在安装包所在的目录执行以下命令。如果已安装相应版本的 Engram，可以直接执行第二行。
+把拾趣和 Engram 安装到同一个 profile。Desktop 用户用应用菜单里的「管理 dsh 命令」注册 Desktop 内置命令，完全退出 Desktop 后，在安装包所在的目录执行：
+
+```sh
+dsh plugin --profile desktop add ./dsh-shiqu-0.1.2.tgz
+```
+
+没有记忆宫殿时，在同一 profile 安装 `@kenz1117/dsh-engram@0.13.10`。单独启动 DSH Web 的用户用以下命令：
 
 ```sh
 dsh plugin --profile web add @kenz1117/dsh-engram@0.13.10
-dsh plugin --profile web add ./dsh-shiqu-0.1.0.tgz
+dsh plugin --profile web add ./dsh-shiqu-0.1.2.tgz
 ```
 
 重启 DSH，进入 **设置 → 拾趣**。如果 Engram 初装报 `ERR_PNPM_IGNORED_BUILDS`，请按 [Engram 的安装说明](https://github.com/kenz1117/dsh-engram#readme) 处理该依赖的安装授权，再重试。若命令安装过文件但因故未激活插件，请在 DSH 插件管理中检查并启用已安装项。拾趣自己的 npm 包没有安装脚本。
@@ -21,7 +27,7 @@ dsh plugin --profile web add ./dsh-shiqu-0.1.0.tgz
 4. 保留网页搜索，或添加 GitHub Releases（`owner/repo`）和 RSS/Atom（完整公开网址）。网页搜索沿用 DSH 已配置的搜索提供商及其凭据。
 5. 保存后点「立即研究一轮」。确认收录记录符合预期，再开启自动研究。手动运行也使用当天额度。
 
-卸载用 `dsh plugin --profile web remove dsh-shiqu`。本地收录历史和 Engram 已入库条目可分别保留和管理。
+卸载时使用安装时的 profile，比如 Desktop 用 `dsh plugin --profile desktop remove dsh-shiqu`。本地收录历史和 Engram 已入库条目可分别保留和管理。
 
 ## 研究与收录
 
@@ -56,7 +62,7 @@ npm test
 npm pack
 ```
 
-`package.json` 和 `cordis.patch.yml` 分别定义 npm 包与 DSH 插件。手工安装文件是 `dsh-shiqu-0.1.0.tgz`。如果发布时使用自己的 npm scope，需同时更新 `package.json` 的包名、`cordis.patch.yml` 中插件行的 `name`，以及 `src/client.js` 注册的浏览器模块 ID。独立的设置页和数据目录仍使用 `dsh-shiqu` / `shiqu`。
+`package.json` 和 `cordis.patch.yml` 分别定义 npm 包与 DSH 插件。手工安装文件是 `dsh-shiqu-0.1.2.tgz`。如果发布时使用自己的 npm scope，需同时更新 `package.json` 的包名、`cordis.patch.yml` 中插件行的 `name`，以及 `src/client.js` 注册的浏览器模块 ID。独立的设置页和数据目录仍使用 `dsh-shiqu` / `shiqu`。
 
 可将源代码放进新 GitHub 仓库，添加 `dsh-plugin` 和 `deepseek-harness` topics，再发带 tarball 的 GitHub Release。拥有发布命名空间后，也可运行 `npm publish --access public`。发布前确认仓库里只有源码、文档和测试。
 

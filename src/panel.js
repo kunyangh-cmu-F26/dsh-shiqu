@@ -1,6 +1,9 @@
+import { randomBytes, timingSafeEqual } from 'node:crypto'
+
 const PATH = '/api/dsh-shiqu'
 const LOOPBACK = new Set(['127.0.0.1', '[::1]', 'localhost'])
 const MAX_REQUEST = 32_000
+const PANEL_TOKEN_HEADER = 'x-dsh-shiqu-panel-token'
 
 function sameSite(req) {
   const peer = req.socket.remoteAddress?.replace(/^::ffff:/, '') ?? ''
@@ -9,14 +12,20 @@ function sameSite(req) {
     const host = new URL('http://' + req.headers.host)
     if (!LOOPBACK.has(host.hostname)) return false
     if (req.headers['sec-fetch-site'] === 'cross-site') return false
-    if (req.method === 'GET') return true
-    const origin = new URL(req.headers.origin)
+    if (req.headers.origin === undefined) return true
     const expectedProtocol = req.socket.encrypted ? 'https:' : 'http:'
-    return origin.host === host.host && origin.protocol === expectedProtocol &&
-      /^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] ?? '')
+    return req.headers.origin === expectedProtocol + '//' + host.host
   } catch {
     return false
   }
+}
+
+function canWrite(req, panelToken) {
+  if (!/^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] ?? '')) return false
+  const token = req.headers[PANEL_TOKEN_HEADER]
+  if (typeof token !== 'string') return false
+  const bytes = Buffer.from(token)
+  return bytes.length === panelToken.length && timingSafeEqual(bytes, panelToken)
 }
 
 function respond(res, status, data) {
@@ -42,6 +51,9 @@ async function readBody(req) {
 }
 
 export function registerPanel(server, { state, discovery, sessions, shutdown }) {
+  // Desktop removes Origin on its private proxy. Require the token returned by
+  // the same-site JSON endpoint for writes on both surfaces.
+  const panelToken = Buffer.from(randomBytes(32).toString('base64url'))
   return server.register({
     kind: 'prefix', path: PATH, auth: 'anonymous',
     async handler(req, res) {
@@ -50,12 +62,13 @@ export function registerPanel(server, { state, discovery, sessions, shutdown }) 
       try {
         if (req.method === 'GET' && path === '/state') {
           return respond(res, 200, { settings: state.settings(), latest: state.latest(),
-            busy: discovery.busy(), history: state.history() })
+            busy: discovery.busy(), history: state.history(), panelToken: panelToken.toString() })
         }
         if (req.method === 'GET' && path === '/sessions') {
           return respond(res, 200, { sessions: await sessions.list(AbortSignal.any([shutdown, AbortSignal.timeout(5_000)])) })
         }
         if (req.method !== 'POST') return respond(res, 404, { error: '操作不存在。' })
+        if (!canWrite(req, panelToken)) return respond(res, 403, { error: '请刷新拾趣面板后重试。' })
         const body = await readBody(req)
         if (path === '/settings') {
           state.saveSettings(body)
