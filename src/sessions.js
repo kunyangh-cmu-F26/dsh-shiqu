@@ -17,30 +17,41 @@ export function humanMessages(events, after, now) {
 }
 
 function routeFrom(events) {
-  for (let index = events.length - 1; index >= 0; index--) {
-    const event = events[index]
-    if (event.type !== 'request/header') continue
-    const { provider, model } = event.data?.header?.config ?? {}
-    if (provider && model) return { provider, model, time: event.time ?? 0 }
+  let lastUsed
+  let pending
+  for (const event of events) {
+    if (event.type === 'model/selection') {
+      const { provider, model, reasoningEffort } = event.data ?? {}
+      if (provider && model) pending = { provider, model, reasoningEffort, time: event.time ?? 0 }
+    }
+    if (event.type === 'request/header') {
+      const { provider, model, reasoningEffort } = event.data?.header?.config ?? {}
+      if (provider && model) {
+        lastUsed = { provider, model, time: event.time ?? 0 }
+        if (reasoningEffort && !event.data.header.adapterDefaults?.reasoningEffort) lastUsed.reasoningEffort = reasoningEffort
+        if (pending?.provider === provider && pending.model === model &&
+            pending.reasoningEffort === lastUsed.reasoningEffort) pending = undefined
+      }
+    }
   }
-  return null
+  return pending ?? lastUsed
 }
 
 export function createSessionReader(ctx, state) {
   const snapshots = new Map()
 
-  async function sessionData(id, signal) {
+  async function sessionData(id, cachedRevision, signal) {
     const agent = ctx.get('agents')?.get?.(id)
     if (agent?.session?.snapshotEvents) {
       const events = agent.session.snapshotEvents()
       const revision = 'live:' + (events.at(-1)?.seq ?? -1)
-      return revision === snapshots.get(id)?.revision ? { revision } : { revision, events }
+      return revision === cachedRevision ? { revision } : { revision, events }
     }
     const persistence = ctx.get('sessionPersistence')
     if (!persistence) throw new Error('SESSIONS_UNAVAILABLE')
     const stat = await persistence.stat(id, { signal })
     if (!stat) return null
-    if (stat.revision !== undefined && stat.revision === snapshots.get(id)?.revision) {
+    if (stat.revision !== undefined && stat.revision === cachedRevision) {
       return { revision: stat.revision }
     }
     const handle = await persistence.open(id, 'read', { signal })
@@ -84,20 +95,25 @@ export function createSessionReader(ctx, state) {
       return [...sessions.values()].sort((a, b) => Number(Boolean(b.title)) - Number(Boolean(a.title)) || a.id.localeCompare(b.id))
     },
     async inspect(settings, now, signal) {
+      const interestIds = new Set(settings.sessions)
+      const researchId = settings.researchSession
+      const ids = researchId ? new Set([...interestIds, researchId]) : interestIds
       for (const id of snapshots.keys()) {
-        if (!settings.sessions.includes(id)) snapshots.delete(id)
+        if (!ids.has(id)) snapshots.delete(id)
       }
-      const examined = await Promise.allSettled(settings.sessions.map(async id => {
-        const snapshot = await sessionData(id, signal)
+      const examined = await Promise.allSettled([...ids].map(async id => {
+        const observes = interestIds.has(id)
+        const previous = snapshots.get(id)
+        const revision = previous?.observes === observes ? previous.revision : undefined
+        const snapshot = await sessionData(id, revision, signal)
         if (!snapshot) {
           snapshots.delete(id)
           return null
         }
-        const cursor = state.cursor(id)
-        const previous = snapshots.get(id)
+        const cursor = observes ? state.cursor(id) : -1
         if (!snapshot.events) return { ...previous, messages: previous.messages.filter(message => message.seq > cursor) }
-        const result = { id, revision: snapshot.revision, route: routeFrom(snapshot.events),
-          messages: humanMessages(snapshot.events, cursor, now) }
+        const result = { id, observes, revision: snapshot.revision, route: routeFrom(snapshot.events),
+          messages: observes ? humanMessages(snapshot.events, cursor, now) : [] }
         snapshots.set(id, result)
         return result
       }))
@@ -116,10 +132,14 @@ export function createSessionReader(ctx, state) {
         remaining -= text.length
         cursors.set(message.id, Math.max(message.seq, cursors.get(message.id) ?? -1))
       }
-      const route = settings.provider ? { provider: settings.provider, model: settings.model } :
+      const research = available.find(session => session.id === researchId)
+      const route = researchId ? research?.route : settings.provider ? { provider: settings.provider, model: settings.model } :
         available.map(session => session.route).filter(Boolean).sort((a, b) => b.time - a.time)[0]
-      return { messages, route, cursors: [...cursors].map(([id, seq]) => ({ id, seq })),
-        unreadable: examined.filter(result => result.status === 'rejected' || !result.value).length }
+      const modelIssue = researchId && !research ? 'research-session-unavailable' :
+        researchId && !route ? 'research-session-no-model' : 'no-model'
+      return { messages, route: route && researchId ? { ...route, sessionId: researchId } : route,
+        modelIssue, cursors: [...cursors].map(([id, seq]) => ({ id, seq })),
+        unreadable: settings.sessions.length - available.filter(session => session.observes).length }
     },
   }
 }

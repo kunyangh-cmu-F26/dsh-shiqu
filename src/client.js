@@ -6,7 +6,9 @@ window.__ModuleLoader__.load({
     const statuses = {
       running: '正在研究', complete: '已收录', blocked: '内容审查拦截', failed: '运行失败',
       'import-pending': '等待写入记忆宫殿', 'no-match': '没有合适的新知识', 'no-interest': '没有兴趣线索',
-      'daily-limit': '今天已运行一轮', 'no-model': '请选择有过对话的会话，或设置后台模型',
+      'daily-limit': '今天已运行一轮', 'no-model': '请选择研究会话，或设置后台模型',
+      'research-session-unavailable': '研究会话暂不可用，请重新选择并保存。',
+      'research-session-no-model': '请先在研究会话里选择一个模型，再回来启动研究。',
       'no-source': '请开启网页搜索或添加订阅', busy: '已有一轮在运行', interrupted: '上一轮中断',
     }
     const stages = {
@@ -38,6 +40,10 @@ window.__ModuleLoader__.load({
 
     function field(label, props) {
       return h('label', { style: row }, h('span', null, label), h('input', props))
+    }
+
+    function sessionLabel({ id, title }) {
+      return title ? title + ' · ' + id.replace(/^session-/, '').slice(0, 8) : id
     }
 
     function Section() {
@@ -111,6 +117,8 @@ window.__ModuleLoader__.load({
       const last = snapshot.latest
       const knownIds = new Set(sessions.map(session => session.id))
       const allSessions = [...sessions, ...settings.sessions.filter(id => !knownIds.has(id)).map(id => ({ id, title: '暂不可见' }))]
+      const researchOptions = settings.researchSession && !knownIds.has(settings.researchSession)
+        ? [...sessions, { id: settings.researchSession, title: '暂不可见' }] : sessions
       const check = (label, key) => field(label, { type: 'checkbox', checked: settings[key],
         onChange: event => update(key, event.target.checked) })
       const save = () => act(async () => {
@@ -150,16 +158,25 @@ window.__ModuleLoader__.load({
           field('每日兜底时间', { type: 'time', value: settings.fallbackAt,
             onChange: event => update('fallbackAt', event.target.value) }),
           field('时区', { value: settings.timeZone, onChange: event => update('timeZone', event.target.value) }),
-          h('div', { style: row },
-            field('模型提供商 ID', { value: settings.provider, placeholder: '留空使用所选会话的模型',
-              onChange: event => update('provider', event.target.value) }),
-            field('模型 ID', { value: settings.model, onChange: event => update('model', event.target.value) })),
-          h('fieldset', null, h('legend', null, '允许读取的会话'),
+          h('fieldset', null, h('legend', null, '后台研究'),
+            h('label', { style: row }, h('span', null, '研究会话'),
+              h('select', { value: settings.researchSession,
+                onChange: event => update('researchSession', event.target.value) },
+              h('option', { value: '' }, '请选择研究会话'),
+              researchOptions.map(session => h('option', { key: session.id, value: session.id }, sessionLabel(session))))),
+            h('small', null, '在该会话中选择要用的模型。勾选下方的兴趣来源后，该会话的消息才参与选题。'),
+            !settings.researchSession && h('details', { open: settings.provider ? true : undefined },
+              h('summary', null, '手动指定后台模型'),
+              h('div', { style: row },
+                field('模型提供商 ID', { value: settings.provider,
+                  onChange: event => update('provider', event.target.value) }),
+                field('模型 ID', { value: settings.model, onChange: event => update('model', event.target.value) })))),
+          h('fieldset', null, h('legend', null, '兴趣来源 · 允许读取的会话'),
             allSessions.length ? h('div', { style: { ...stack, gap: 4, maxHeight: 210, overflowY: 'auto', margin: 0 } },
               allSessions.map(session => h('label', { key: session.id, style: row },
                 h('input', { type: 'checkbox', disabled: settings.sessions.length >= 12 && !settings.sessions.includes(session.id),
                   checked: settings.sessions.includes(session.id), onChange: () => toggle(session.id) }),
-                h('span', { title: session.id }, session.title ? session.title + ' · ' + session.id.slice(0, 8) : session.id)))) :
+                h('span', { title: session.id }, sessionLabel(session))))) :
               h('p', null, '没有可选会话。先在 DSH 中创建会话，再重新打开此面板。')),
           h('fieldset', null, h('legend', null, '订阅来源'),
             h('div', { style: row },

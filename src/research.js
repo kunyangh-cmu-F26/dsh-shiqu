@@ -43,6 +43,8 @@ async function generate(llm, route, system, input, signal) {
   const deadline = AbortSignal.any([signal, AbortSignal.timeout(55_000)])
   const options = {
     provider: route.provider, model: route.model, system, maxTokens: 1800, signal: deadline,
+    ...(route.reasoningEffort ? { reasoningEffort: route.reasoningEffort } : {}),
+    ...(route.sessionId ? { sessionId: route.sessionId } : {}),
     messages: [{ role: 'user', content: [{ type: 'text', text: JSON.stringify(input) }] }],
   }
   for await (const chunk of llm.stream(options)) {

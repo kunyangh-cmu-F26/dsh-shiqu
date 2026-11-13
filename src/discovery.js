@@ -73,7 +73,7 @@ export function createDiscovery({ state, palace, sessions, host, now = Date.now,
     const reading = await sessions.inspect(settings, started, signal)
     const early = trigger === 'scheduled' && slot.time < settings.fallbackAt
     if (early && !reading.messages.some(message => INTEREST_SIGNAL.test(message))) return { outcome: 'waiting' }
-    if (!reading.route) return { outcome: 'no-model' }
+    if (!reading.route) return { outcome: reading.modelIssue ?? 'no-model' }
     if (!state.claim(slot.day, started)) return { outcome: 'daily-limit' }
 
     let stage = 'engram-read'

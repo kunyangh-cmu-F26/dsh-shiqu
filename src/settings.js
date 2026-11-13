@@ -1,5 +1,6 @@
 const MAX_SESSIONS = 12
 const MAX_SUBSCRIPTIONS = 12
+const SESSION_ID = /^[\w.:-]{1,160}$/
 
 export const defaults = Object.freeze({
   enabled: false,
@@ -8,6 +9,7 @@ export const defaults = Object.freeze({
   explore: true,
   webSearch: true,
   sessions: [],
+  researchSession: '',
   subscriptions: [],
   provider: '',
   model: '',
@@ -50,7 +52,7 @@ function validateSubscription(subscription) {
 
 export function validateSettings(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('配置格式错误。')
-  const { enabled, fallbackAt, timeZone, explore, webSearch, sessions, subscriptions, provider, model } = { ...defaults, ...input }
+  const { enabled, fallbackAt, timeZone, explore, webSearch, sessions, researchSession, subscriptions, provider, model } = { ...defaults, ...input }
   if (![enabled, explore, webSearch].every(value => typeof value === 'boolean')) throw new Error('配置开关格式错误。')
   if (typeof fallbackAt !== 'string' || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(fallbackAt)) throw new Error('时间应为 HH:MM。')
   if (typeof timeZone !== 'string' || !timeZone || timeZone.length > 80) throw new Error('时区无效。')
@@ -60,8 +62,11 @@ export function validateSettings(input) {
     throw new Error('时区无效。请填写如 America/Los_Angeles 或 Asia/Shanghai。')
   }
   if (!Array.isArray(sessions) || sessions.length > MAX_SESSIONS ||
-      !sessions.every(id => typeof id === 'string' && /^[\w.:-]{1,160}$/.test(id))) {
+      !sessions.every(id => typeof id === 'string' && SESSION_ID.test(id))) {
     throw new Error('最多允许选 12 个有效会话。')
+  }
+  if (typeof researchSession !== 'string' || (researchSession !== '' && !SESSION_ID.test(researchSession))) {
+    throw new Error('研究会话 ID 无效。')
   }
   if (!Array.isArray(subscriptions) || subscriptions.length > MAX_SUBSCRIPTIONS) throw new Error('最多允许 12 个订阅。')
   if (![provider, model].every(value => typeof value === 'string' && value.length <= 150 && !/[\r\n]/.test(value)) ||
@@ -72,7 +77,7 @@ export function validateSettings(input) {
     const subscription = validateSubscription(raw)
     uniqueSubscriptions.set(`${subscription.type}:${subscription.value}`, subscription)
   }
-  return { enabled, fallbackAt, timeZone, explore, webSearch, sessions: [...new Set(sessions)],
+  return { enabled, fallbackAt, timeZone, explore, webSearch, sessions: [...new Set(sessions)], researchSession,
     subscriptions: [...uniqueSubscriptions.values()], provider: provider.trim(), model: model.trim() }
 }
 
