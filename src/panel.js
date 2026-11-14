@@ -1,4 +1,5 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto'
+import { localTime } from './settings.js'
 
 const PATH = '/api/dsh-shiqu'
 const LOOPBACK = new Set(['127.0.0.1', '[::1]', 'localhost'])
@@ -61,7 +62,9 @@ export function registerPanel(server, { state, discovery, sessions, shutdown }) 
       const path = new URL(req.url, 'http://127.0.0.1').pathname.slice(PATH.length)
       try {
         if (req.method === 'GET' && path === '/state') {
-          return respond(res, 200, { settings: state.settings(), latest: state.latest(),
+          const settings = state.settings()
+          return respond(res, 200, { settings, latest: state.latest(),
+            automaticCount: state.automaticCount(localTime(Date.now(), settings.timeZone).day),
             busy: discovery.busy(), history: state.history(), panelToken: panelToken.toString() })
         }
         if (req.method === 'GET' && path === '/sessions') {
@@ -73,6 +76,12 @@ export function registerPanel(server, { state, discovery, sessions, shutdown }) 
         if (path === '/settings') {
           state.saveSettings(body)
           return respond(res, 200, { ok: true })
+        }
+        if (path === '/diagnose') {
+          if (!sessions?.diagnose) return respond(res, 503, { error: '当前版本无法检测会话。' })
+          const result = await sessions.diagnose(state.settings(), AbortSignal.any([shutdown ?? new AbortController().signal,
+            AbortSignal.timeout(15_000)]))
+          return respond(res, 200, { sessions: result })
         }
         if (path === '/run') {
           const status = await discovery.start('manual')

@@ -1,19 +1,19 @@
 window.__ModuleLoader__.load({
   id: 'dsh-shiqu',
   factory(require) {
-    const { createElement: h, useEffect, useState } = require('react')
+    const { createElement: h, useEffect, useRef, useState } = require('react')
     const prefix = '/api/dsh-shiqu'
     const statuses = {
       running: '正在研究', complete: '已收录', blocked: '内容审查拦截', failed: '运行失败',
       'import-pending': '等待写入记忆宫殿', 'no-match': '没有合适的新知识', 'no-interest': '没有兴趣线索',
-      'daily-limit': '今天已运行一轮', 'no-model': '请选择研究会话，或设置后台模型',
+      'daily-limit': '今日自动研究次数已达上限', 'no-model': '请选择研究会话，或设置后台模型',
       'research-session-unavailable': '研究会话暂不可用，请重新选择并保存。',
       'research-session-no-model': '请先在研究会话里选择一个模型，再回来启动研究。',
       'no-source': '请开启网页搜索或添加订阅', busy: '已有一轮在运行', interrupted: '上一轮中断',
     }
     const stages = {
       'engram-read': '读取记忆宫殿', topic: '提取研究主题', search: '搜索与订阅',
-      select: '筛选资料', import: '写入记忆宫殿',
+      summary: '总结选中会话', select: '筛选资料', import: '写入记忆宫殿',
     }
     const entryStatus = {
       pending: '待写入', imported: '已收录', duplicate: '已存在', conflict: '入库冲突',
@@ -50,9 +50,14 @@ window.__ModuleLoader__.load({
       const [snapshot, setSnapshot] = useState(null)
       const [settings, setSettings] = useState(null)
       const [sessions, setSessions] = useState([])
+      const [diagnostics, setDiagnostics] = useState(null)
       const [notice, setNotice] = useState('')
       const [working, setWorking] = useState(false)
       const [researching, setResearching] = useState(false)
+      const [saving, setSaving] = useState(false)
+      const [revision, setRevision] = useState(0)
+      const saveQueue = useRef(Promise.resolve())
+      const latestRevision = useRef(0)
       const [subscriptionType, setSubscriptionType] = useState('github')
       const [subscriptionValue, setSubscriptionValue] = useState('')
 
@@ -97,12 +102,14 @@ window.__ModuleLoader__.load({
       }
 
       function update(key, value) {
-        setSettings(current => ({ ...current, [key]: value }))
+        setSettings(current => ({ ...current, [key]: typeof value === 'function' ? value(current[key]) : value }))
+        latestRevision.current++
+        setRevision(latestRevision.current)
       }
 
       function toggle(id) {
-        setSettings(current => ({ ...current, sessions: current.sessions.includes(id)
-          ? current.sessions.filter(value => value !== id) : [...current.sessions, id] }))
+        update('sessions', current => current.includes(id)
+          ? current.filter(value => value !== id) : [...current, id])
       }
 
       function addSubscription() {
@@ -111,6 +118,29 @@ window.__ModuleLoader__.load({
         update('subscriptions', [...settings.subscriptions, { type: subscriptionType, value }])
         setSubscriptionValue('')
       }
+
+      function enqueueSave(value) {
+        saveQueue.current = saveQueue.current.catch(() => undefined)
+          .then(() => api('/settings', value, snapshot.panelToken))
+        return saveQueue.current
+      }
+
+      // Debounced, serialized saves prevent an older request from overwriting a newer change.
+      useEffect(() => {
+        if (!revision || !snapshot || !settings) return undefined
+        let cancelled = false
+        const timer = setTimeout(() => {
+          setSaving(true)
+          enqueueSave(settings).then(() => {
+            if (!cancelled && latestRevision.current === revision) setNotice('设置已自动保存。')
+          }).catch(error => {
+            if (!cancelled && latestRevision.current === revision) setNotice('自动保存失败：' + error.message)
+          }).finally(() => {
+            if (!cancelled && latestRevision.current === revision) setSaving(false)
+          })
+        }, 700)
+        return () => { cancelled = true; clearTimeout(timer) }
+      }, [revision])
 
       if (!snapshot || !settings) return h('p', { role: 'status' }, notice || '正在加载拾趣…')
       const post = (path, body) => api(path, body, snapshot.panelToken)
@@ -122,10 +152,21 @@ window.__ModuleLoader__.load({
       const check = (label, key) => field(label, { type: 'checkbox', checked: settings[key],
         onChange: event => update(key, event.target.checked) })
       const save = () => act(async () => {
-        await post('/settings', settings)
-        setSettings((await api('/state')).settings)
+        await enqueueSave(settings)
         return '设置已保存。'
       })
+      const diagnosticLabels = {
+        readable: '可读取', 'not-found': '会话不存在', 'reader-unavailable': '缺少读取服务',
+        'read-failed': '读取失败', 'invalid-history': '历史记录无效',
+        'format-incompatible': '格式不兼容',
+      }
+      async function diagnose() {
+        await act(async () => {
+          const result = await post('/diagnose', {})
+          setDiagnostics(result.sessions)
+          return '会话检查完成（不激活会话）。'
+        })
+      }
       async function run() {
         setResearching(true)
         try {
@@ -142,13 +183,14 @@ window.__ModuleLoader__.load({
         h('section', { style: card, 'aria-label': '运行状态' },
           h('strong', null, '运行状态'),
           h('div', null, last ? `${last.day} · ${statuses[last.outcome] ?? last.outcome}` : '尚未运行'),
+          h('div', null, `今日自动研究 · ${snapshot.automaticCount ?? 0} / ${settings.dailyLimit}`),
           last?.details.topic && h('div', null, '上次主题 · ' + last.details.topic),
           last?.details.stage && h('div', null, '阶段 · ' + (stages[last.details.stage] ?? last.details.stage)),
           last?.details.code && h('code', null, last.details.code),
           last?.details.filtered > 0 && h('div', null, '被拦截的来源 · ' + last.details.filtered),
           last?.details.failed > 0 && h('div', null, '读取失败的来源 · ' + last.details.failed),
           last?.details.unreadable > 0 && h('div', null, '暂时读不到的已选会话 · ' + last.details.unreadable),
-          h('div', { style: row }, button(researching || snapshot.busy ? '正在研究…' : '立即研究一轮',
+          h('div', { style: row }, button(researching || snapshot.busy ? '正在研究…' : '立即研究（不受每日上限限制）',
             run, working || snapshot.busy),
             h('span', { role: 'status', 'aria-live': 'polite' }, notice))),
         h('section', { style: card, 'aria-label': '设置' },
@@ -158,13 +200,24 @@ window.__ModuleLoader__.load({
           field('每日兜底时间', { type: 'time', value: settings.fallbackAt,
             onChange: event => update('fallbackAt', event.target.value) }),
           field('时区', { value: settings.timeZone, onChange: event => update('timeZone', event.target.value) }),
+          field('每日自动研究次数（1–24）', { type: 'number', min: 1, max: 24, step: 1,
+            value: settings.dailyLimit, onChange: event => update('dailyLimit', event.target.value === '' ? '' : Number(event.target.value)) }),
+          h('fieldset', null, h('legend', null, '模型 Token 预算'),
+            h('div', null, '默认每次模型请求最多输出 8000 Token，主题选择和资料筛选分别使用该上限。'),
+            h('label', { style: row },
+              h('input', { type: 'checkbox', checked: settings.tokenBudget !== null,
+                onChange: event => update('tokenBudget', event.target.checked ? 8000 : null) }),
+              h('span', null, '自定义 Token 预算')),
+            field('每次请求上限（512–65536）', { type: 'number', min: 512, max: 65536, step: 1,
+              disabled: settings.tokenBudget === null, value: settings.tokenBudget ?? 8000,
+              onChange: event => update('tokenBudget', event.target.value === '' ? '' : Number(event.target.value)) })),
           h('fieldset', null, h('legend', null, '后台研究'),
             h('label', { style: row }, h('span', null, '研究会话'),
               h('select', { value: settings.researchSession,
                 onChange: event => update('researchSession', event.target.value) },
               h('option', { value: '' }, '请选择研究会话'),
               researchOptions.map(session => h('option', { key: session.id, value: session.id }, sessionLabel(session))))),
-            h('small', null, '在该会话中选择要用的模型。勾选下方的兴趣来源后，该会话的消息才参与选题。'),
+            h('small', null, '在该会话中选择要用的模型。每轮研究会单独总结已选兴趣会话（包括可读取的非活跃会话），不会向这些聊天发送消息。'),
             !settings.researchSession && h('details', { open: settings.provider ? true : undefined },
               h('summary', null, '手动指定后台模型'),
               h('div', { style: row },
@@ -178,6 +231,14 @@ window.__ModuleLoader__.load({
                   checked: settings.sessions.includes(session.id), onChange: () => toggle(session.id) }),
                 h('span', { title: session.id }, sessionLabel(session))))) :
               h('p', null, '没有可选会话。先在 DSH 中创建会话，再重新打开此面板。')),
+          h('div', { style: row }, button('检查已选会话读取状态', diagnose, working || snapshot.busy),
+            h('small', null, '可诊断非活跃会话；不发送聊天内容给面板。')),
+          diagnostics && h('div', { role: 'status', style: { display: 'grid', gap: 4 } },
+            diagnostics.length ? diagnostics.map(item => h('div', { key: item.id },
+              (sessions.find(session => session.id === item.id)?.title || item.id.slice(0, 12)),
+              ' · ', diagnosticLabels[item.status] || item.status,
+              item.status === 'readable' ? ` · ${item.eventCount} 条事件${item.hasModel ? '' : ' · 未发现模型'}` : '')) :
+              '没有选中的会话。'),
           h('fieldset', null, h('legend', null, '订阅来源'),
             h('div', { style: row },
               h('select', { 'aria-label': '订阅类型', value: subscriptionType,
@@ -190,7 +251,8 @@ window.__ModuleLoader__.load({
             h('ul', null, settings.subscriptions.map((subscription, index) =>
               h('li', { key: subscription.type + subscription.value + index },
                 subscription.value, ' ', button('移除', () => update('subscriptions', settings.subscriptions.filter((_, position) => position !== index))))))),
-          h('div', null, button('保存设置', save, working))),
+          h('div', { style: row }, button('立即保存设置', save, working || saving),
+            h('small', null, saving ? '正在自动保存…' : '更改后约 0.7 秒自动保存'))),
         h('section', { style: card, 'aria-label': '收录记录' },
           h('strong', null, '收录记录'),
           snapshot.history.length ? snapshot.history.map(item => h('article', { key: item.id, style: card },

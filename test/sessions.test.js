@@ -68,3 +68,70 @@ test('reports missing or unconfigured research sessions and preserves legacy mod
   const explicit = await inspect({ sessions: ['chat'], provider: 'manual', model: 'manual' })
   assert.equal(explicit.route.model, 'manual')
 })
+
+test('cold persisted session appears in picker and can be read without an Agent', async t => {
+  const state = openState(':memory:')
+  t.after(() => state.close())
+  let inspections = 0
+  const past = now - 35 * 86_400_000
+  const ctx = { get: name => {
+    if (name === 'sessionController') return {
+      async list() { return { items: [{ sessionId: 'cold', projections: { values: { title: '旧对话' } } }] } },
+      async inspect(id) {
+        assert.equal(id, 'cold')
+        inspections++
+        return { events: [{ ...message('摄影入门和相机曝光', 1), time: past }, request('fixture', 'model')] }
+      },
+    }
+    if (name === 'agents') return { get() { return undefined } }
+  } }
+  const reader = createSessionReader(ctx, state)
+  assert.deepEqual(await reader.list(signal), [{ id: 'cold', title: '旧对话' }])
+  const settings = { ...state.settings(), sessions: ['cold'] }
+  const reading = await reader.inspect(settings, now, signal)
+  assert.equal(reading.messages.length, 0) // Not a fresh 14-day trigger.
+  assert.equal(reading.conversations.length, 1) // Still usable for interest summary.
+  assert.equal(reading.conversations[0].messages[0].text, '摄影入门和相机曝光')
+  assert.equal(reading.route.model, 'model')
+  assert.equal(reading.unreadable, 0)
+  assert.equal((await reader.diagnose(settings, signal))[0].status, 'readable')
+  assert.ok(inspections >= 1)
+})
+
+test('uses positional persistence read for an inactive session when controller is unavailable', async t => {
+  const state = openState(':memory:')
+  t.after(() => state.close())
+  let closeCount = 0
+  const reader = createSessionReader({ get: name => name === 'sessionPersistence' ? {
+    async stat(id) { return id === 'cold' && { revision: 'r1' } },
+    async open(id, mode) {
+      assert.equal(id, 'cold')
+      assert.equal(mode, 'read')
+      return {
+        async read(offset, length) {
+          assert.equal(offset, undefined)
+          assert.equal(length, undefined)
+          return { events: [message('想研究相机曝光', 0)] }
+        },
+        async close() { closeCount++ },
+      }
+    },
+  } : undefined }, state)
+  const settings = { ...state.settings(), sessions: ['cold'] }
+  assert.equal((await reader.inspect(settings, now, signal)).unreadable, 0)
+  assert.equal(closeCount, 1)
+})
+
+test('reports unreadable session failure without exposing content', async t => {
+  const state = openState(':memory:')
+  t.after(() => state.close())
+  const reader = createSessionReader({ get: name => name === 'sessionPersistence' ? {
+    async stat() { throw Object.assign(new Error('private token secret'), { code: 'SESSION_FORMAT_UNSUPPORTED' }) },
+  } : undefined }, state)
+  const settings = { ...state.settings(), sessions: ['old'] }
+  const result = await reader.diagnose(settings, signal)
+  assert.deepEqual(result, [{ id: 'old', roles: ['interest'], status: 'format-incompatible' }])
+  const reading = await reader.inspect(settings, now, signal)
+  assert.equal(reading.unreadable, 1)
+  assert.deepEqual(reading.unreadableSessions, [{ id: 'old', reason: 'format-incompatible' }])
+})

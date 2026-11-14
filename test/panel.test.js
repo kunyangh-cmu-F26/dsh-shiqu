@@ -12,7 +12,11 @@ test('Desktop can save settings and run research when its proxy removes Origin',
       settings: () => settings,
       latest: () => null,
       history: () => [],
+      automaticCount: () => 0,
       saveSettings: next => { settings = next },
+    },
+    sessions: {
+      async diagnose() { return [{ id: 'cold', roles: ['interest'], status: 'readable', eventCount: 50, hasModel: true }] },
     },
     discovery: {
       busy: () => false,
@@ -45,4 +49,5 @@ test('Desktop can save settings and run research when its proxy removes Origin',
   assert.deepEqual((await request('state', 'GET')).body.settings, { enabled: true })
   assert.equal((await request('run', 'POST', panel)).body.outcome, 'complete')
   assert.equal(runs, 1)
+  assert.equal((await request('diagnose', 'POST', panel)).body.sessions[0].status, 'readable')
 })

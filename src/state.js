@@ -6,6 +6,39 @@ import { defaults, validateSettings } from './settings.js'
 const DAY = 86_400_000
 const TEN_MINUTES = 600_000
 
+function ensureRunSchema(db) {
+  const columns = db.prepare('PRAGMA table_info(runs)').all()
+  // Versions <=0.1.3 used day as the primary key, which prevented multiple runs in one day.
+  // Preserve their history atomically. Legacy runs count against today's automatic quota.
+  if (columns.some(column => column.name === 'day' && column.pk === 1)) {
+    db.exec('BEGIN IMMEDIATE')
+    try {
+      db.exec(`
+        ALTER TABLE runs RENAME TO runs_legacy;
+        CREATE TABLE runs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          day TEXT NOT NULL, started INTEGER NOT NULL, outcome TEXT NOT NULL,
+          details TEXT NOT NULL, trigger TEXT NOT NULL DEFAULT 'scheduled'
+        );
+        INSERT INTO runs (day, started, outcome, details, trigger)
+          SELECT day, started, outcome, details, 'legacy' FROM runs_legacy;
+        DROP TABLE runs_legacy;
+      `)
+      db.exec('COMMIT')
+    } catch (error) {
+      db.exec('ROLLBACK')
+      throw error
+    }
+  } else if (!columns.length) {
+    db.exec(`CREATE TABLE runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      day TEXT NOT NULL, started INTEGER NOT NULL, outcome TEXT NOT NULL,
+      details TEXT NOT NULL, trigger TEXT NOT NULL DEFAULT 'scheduled'
+    )`)
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS runs_day_trigger ON runs(day, trigger)')
+}
+
 export function openState(file) {
   if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true, mode: 0o700 })
   const db = new DatabaseSync(file)
@@ -13,9 +46,6 @@ export function openState(file) {
     PRAGMA busy_timeout = 2000;
     PRAGMA journal_mode = WAL;
     CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK(id = 1), value TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS runs (
-      day TEXT PRIMARY KEY, started INTEGER NOT NULL, outcome TEXT NOT NULL, details TEXT NOT NULL
-    );
     CREATE TABLE IF NOT EXISTS cursors (session TEXT PRIMARY KEY, seq INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS moderation (digest TEXT PRIMARY KEY, created INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS discoveries (
@@ -24,6 +54,7 @@ export function openState(file) {
       source TEXT NOT NULL, published TEXT, added INTEGER NOT NULL, status TEXT NOT NULL, feedback INTEGER NOT NULL DEFAULT 0
     );
   `)
+  ensureRunSchema(db)
 
   return {
     settings() {
@@ -49,26 +80,32 @@ export function openState(file) {
         throw error
       }
     },
-    claim(day, now) {
-      return db.prepare(`INSERT OR IGNORE INTO runs
-        SELECT ?, ?, 'running', '{}' WHERE NOT EXISTS (
+    automaticCount(day) {
+      return db.prepare("SELECT COUNT(*) AS count FROM runs WHERE day=? AND trigger<>'manual'").get(day).count
+    },
+    // The limit applies to scheduled rounds only. Manual rounds may always be claimed;
+    // they neither consume scheduled slots nor bypass the running-job lock.
+    claim(day, started, trigger, dailyLimit) {
+      const result = db.prepare(`INSERT INTO runs (day, started, outcome, details, trigger)
+        SELECT ?, ?, 'running', '{}', ? WHERE NOT EXISTS (
           SELECT 1 FROM runs WHERE outcome='running' AND started > ?
-        )`).run(day, now, now - TEN_MINUTES).changes === 1
+        ) AND (?='manual' OR (
+          SELECT COUNT(*) FROM runs WHERE day=? AND trigger<>'manual'
+        ) < ?)`)
+        .run(day, started, trigger, started - TEN_MINUTES, trigger, day, dailyLimit)
+      return result.changes ? Number(result.lastInsertRowid) : null
     },
-    runForDay(day) {
-      return db.prepare('SELECT 1 FROM runs WHERE day=?').get(day) !== undefined
-    },
-    finish(day, outcome, details = {}) {
-      db.prepare('UPDATE runs SET outcome=?, details=? WHERE day=?').run(outcome, JSON.stringify(details), day)
+    finish(id, outcome, details = {}) {
+      db.prepare('UPDATE runs SET outcome=?, details=? WHERE id=?').run(outcome, JSON.stringify(details), id)
     },
     latest() {
-      const row = db.prepare('SELECT * FROM runs ORDER BY started DESC LIMIT 1').get()
+      const row = db.prepare('SELECT * FROM runs ORDER BY started DESC, id DESC LIMIT 1').get()
       if (!row) return null
       return { ...row, outcome: row.outcome === 'running' && Date.now() - row.started > TEN_MINUTES
         ? 'interrupted' : row.outcome, details: JSON.parse(row.details) }
     },
     recentTopics() {
-      return db.prepare("SELECT details FROM runs WHERE outcome IN ('complete','no-match') ORDER BY started DESC LIMIT 8")
+      return db.prepare("SELECT details FROM runs WHERE outcome IN ('complete','no-match') ORDER BY started DESC, id DESC LIMIT 8")
         .all().flatMap(row => JSON.parse(row.details).topic || [])
     },
     recentFeedback() {

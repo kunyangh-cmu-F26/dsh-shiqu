@@ -2,8 +2,12 @@ const MAX_SESSIONS = 12
 const MAX_SUBSCRIPTIONS = 12
 const SESSION_ID = /^[\w.:-]{1,160}$/
 
+export const DEFAULT_MAX_TOKENS = 8_000
+
 export const defaults = Object.freeze({
   enabled: false,
+  dailyLimit: 1,
+  tokenBudget: null, // null uses the default maxTokens budget
   fallbackAt: '17:00',
   timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
   explore: true,
@@ -52,8 +56,12 @@ function validateSubscription(subscription) {
 
 export function validateSettings(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('配置格式错误。')
-  const { enabled, fallbackAt, timeZone, explore, webSearch, sessions, researchSession, subscriptions, provider, model } = { ...defaults, ...input }
+  const { enabled, dailyLimit, tokenBudget, fallbackAt, timeZone, explore, webSearch, sessions, researchSession, subscriptions, provider, model } = { ...defaults, ...input }
   if (![enabled, explore, webSearch].every(value => typeof value === 'boolean')) throw new Error('配置开关格式错误。')
+  if (!Number.isInteger(dailyLimit) || dailyLimit < 1 || dailyLimit > 24) throw new Error('每日自动研究次数应为 1–24。')
+  if (tokenBudget !== null && (!Number.isInteger(tokenBudget) || tokenBudget < 512 || tokenBudget > 65_536)) {
+    throw new Error('Token 预算应为 512–65536，或关闭自定义以使用默认 8000。')
+  }
   if (typeof fallbackAt !== 'string' || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(fallbackAt)) throw new Error('时间应为 HH:MM。')
   if (typeof timeZone !== 'string' || !timeZone || timeZone.length > 80) throw new Error('时区无效。')
   try {
@@ -77,7 +85,7 @@ export function validateSettings(input) {
     const subscription = validateSubscription(raw)
     uniqueSubscriptions.set(`${subscription.type}:${subscription.value}`, subscription)
   }
-  return { enabled, fallbackAt, timeZone, explore, webSearch, sessions: [...new Set(sessions)], researchSession,
+  return { enabled, dailyLimit, tokenBudget, fallbackAt, timeZone, explore, webSearch, sessions: [...new Set(sessions)], researchSession,
     subscriptions: [...uniqueSubscriptions.values()], provider: provider.trim(), model: model.trim() }
 }
 

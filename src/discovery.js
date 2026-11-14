@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { knowledgeId } from './engram.js'
-import { chooseTopic, isModeration, privateExcerpt, selectKnowledge } from './research.js'
+import { chooseTopic, isModeration, privateExcerpt, selectKnowledge, summarizeConversations } from './research.js'
 import { localTime } from './settings.js'
 import { collectSources, isRecentUpdate } from './sources.js'
 
@@ -27,6 +27,17 @@ function finalOutcome(result, imported) {
 
 function inputDigest(stage, value) {
   return createHash('sha256').update(JSON.stringify([stage, value])).digest('hex')
+}
+
+// Spread automatic fallback rounds across the remaining local day rather than
+// consuming a raised daily quota in consecutive 3-minute polling cycles.
+function scheduledSlotDue(slot, settings, completed) {
+  if (slot.time < settings.fallbackAt) return false
+  const [hour, minute] = slot.time.split(':').map(Number)
+  const [fallbackHour, fallbackMinute] = settings.fallbackAt.split(':').map(Number)
+  const remainingMinutes = 24 * 60 - (fallbackHour * 60 + fallbackMinute)
+  const elapsedMinutes = hour * 60 + minute - (fallbackHour * 60 + fallbackMinute)
+  return completed < 1 + Math.floor(elapsedMinutes * settings.dailyLimit / remainingMinutes)
 }
 
 function previousBlock() {
@@ -68,13 +79,18 @@ export function createDiscovery({ state, palace, sessions, host, now = Date.now,
     if (!settings.webSearch && settings.subscriptions.length === 0) return { outcome: 'no-source' }
     const started = now()
     const slot = localTime(started, settings.timeZone)
-    if (state.runForDay(slot.day)) return { outcome: 'daily-limit' }
+    const automaticCount = state.automaticCount(slot.day)
+    if (trigger !== 'manual' && automaticCount >= settings.dailyLimit) return { outcome: 'daily-limit' }
+    if (trigger === 'scheduled' && slot.time >= settings.fallbackAt &&
+        !scheduledSlotDue(slot, settings, automaticCount)) return { outcome: 'waiting' }
     const signal = AbortSignal.any([shutdown, AbortSignal.timeout(RUN_TIMEOUT)])
     const reading = await sessions.inspect(settings, started, signal)
     const early = trigger === 'scheduled' && slot.time < settings.fallbackAt
     if (early && !reading.messages.some(message => INTEREST_SIGNAL.test(message))) return { outcome: 'waiting' }
     if (!reading.route) return { outcome: reading.modelIssue ?? 'no-model' }
-    if (!state.claim(slot.day, started)) return { outcome: 'daily-limit' }
+    const runId = state.claim(slot.day, started, trigger, settings.dailyLimit)
+    if (runId === null) return { outcome: state.automaticCount(slot.day) >= settings.dailyLimit && trigger !== 'manual'
+      ? 'daily-limit' : 'busy' }
 
     let stage = 'engram-read'
     let fingerprint
@@ -88,7 +104,7 @@ export function createDiscovery({ state, palace, sessions, host, now = Date.now,
         if (resumed.pending || resumed.filtered) {
           outcome = resumed.filtered ? 'blocked' : 'import-pending'
           details = { ...resumed, stage }
-          state.finish(slot.day, outcome, details)
+          state.finish(runId, outcome, details)
           return { outcome }
         }
         details.imported = resumed.imported
@@ -96,17 +112,25 @@ export function createDiscovery({ state, palace, sessions, host, now = Date.now,
       }
       state.prune(started)
       const interests = (await palace.readInterests(signal)).map(text => privateExcerpt(text, 600)).filter(Boolean)
-      if (interests.length === 0 && reading.messages.length === 0) {
+      if (interests.length === 0 && reading.messages.length === 0 && !reading.conversations?.length) {
         outcome = 'no-interest'
       } else {
+        let conversationInterests = []
+        if (reading.conversations?.length) {
+          stage = 'summary'
+          fingerprint = inputDigest(stage, reading.conversations)
+          if (state.wasBlocked(fingerprint)) throw previousBlock()
+          conversationInterests = await summarizeConversations(host.llm, reading.route,
+            reading.conversations, signal, settings.tokenBudget)
+        }
         stage = 'topic'
         const dayNumber = Math.floor(Date.parse(slot.day) / 86_400_000)
-        fingerprint = inputDigest(stage, [interests, reading.messages])
+        fingerprint = inputDigest(stage, [interests, conversationInterests, reading.messages])
         if (state.wasBlocked(fingerprint)) throw previousBlock()
         const plan = await chooseTopic(host.llm, reading.route, {
-          interests, messages: reading.messages, feedback: state.recentFeedback(),
+          interests: [...interests, ...conversationInterests], messages: reading.messages, feedback: state.recentFeedback(),
           history: [...new Set(state.recentTopics())], exploration: settings.explore && dayNumber % 5 === 0,
-        }, signal)
+        }, signal, settings.tokenBudget)
         if (!plan) {
           outcome = 'no-match'
           state.saveCursors(reading.cursors)
@@ -127,7 +151,7 @@ export function createDiscovery({ state, palace, sessions, host, now = Date.now,
             stage = 'select'
             fingerprint = inputDigest(stage, [topic, sources])
             if (state.wasBlocked(fingerprint)) throw previousBlock()
-            const selected = sources.length ? await selectKnowledge(host.llm, reading.route, topic, sources, signal) : []
+            const selected = sources.length ? await selectKnowledge(host.llm, reading.route, topic, sources, signal, settings.tokenBudget) : []
             const worthy = selected.filter(item => categoryIsFresh(item, started))
             for (const item of worthy) {
               state.queue({ ...item, id: knowledgeId(item.url), topic, added: started, source: item.type })
@@ -150,7 +174,8 @@ export function createDiscovery({ state, palace, sessions, host, now = Date.now,
       details = failure.details
     }
     if (details.imported && ['no-interest', 'no-match'].includes(outcome)) outcome = 'complete'
-    state.finish(slot.day, outcome, { ...details, ...(topic ? { topic } : {}), unreadable: reading.unreadable })
+    state.finish(runId, outcome, { ...details, ...(topic ? { topic } : {}), unreadable: reading.unreadable,
+      unreadableSessions: reading.unreadableSessions ?? [] })
     return { outcome }
   }
 

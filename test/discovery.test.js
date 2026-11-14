@@ -11,7 +11,7 @@ const start = Date.parse('2026-11-13T17:20:00Z')
 const route = { provider: 'fixture', model: 'fixture' }
 const signal = new AbortController().signal
 
-function setup(t, { initialMessages = [], moderateAt, failImport } = {}) {
+function setup(t, { initialMessages = [], conversationMessages = [], moderateAt, failImport } = {}) {
   let time = start
   let messages = initialMessages
   let writes = 0
@@ -36,6 +36,8 @@ function setup(t, { initialMessages = [], moderateAt, failImport } = {}) {
     async inspect() {
       const fresh = state.cursor('test') < 1
       return { route, messages: fresh ? messages : [],
+        conversations: conversationMessages.length ? [{ source: 1, messages: conversationMessages.map(text =>
+          ({ date: '2026-11-13', text })) }] : [],
         cursors: fresh && messages.length ? [{ id: 'test', seq: 1 }] : [], unreadable: 0 }
     },
   }
@@ -43,12 +45,14 @@ function setup(t, { initialMessages = [], moderateAt, failImport } = {}) {
     llm: {
       async *stream(options) {
         const selection = options.system.includes('候选网页摘要')
-        calls.push(selection ? 'select' : 'topic')
+        const summary = options.system.includes('从指定的聊天记录中概括')
+        calls.push(summary ? 'summary' : selection ? 'select' : 'topic')
         if (moderateAt === calls.at(-1)) {
           yield { type: 'finish', reason: { kind: 'error', failure: { code: 'content_filter', message: 'marked' } } }
           return
         }
-        const text = JSON.stringify(selection ? { items: [{ source: 0, category: 'guide',
+        const text = JSON.stringify(summary ? { topics: ['人像摄影', '调色'] } :
+          selection ? { items: [{ source: 0, category: 'guide',
           summary: '使用反光板补足面部阴影', reason: '适合日落实拍' }] } :
           { topic: '日落人像', query: '日落人像 反光板' })
         yield { type: 'text-delta', index: 0, text }
@@ -70,7 +74,7 @@ function setup(t, { initialMessages = [], moderateAt, failImport } = {}) {
     clearProfile() { profile = [] } }
 }
 
-test('runs early when an interest appears, records a source, and shares the daily cap with manual runs', async t => {
+test('runs early when an interest appears and manual research bypasses the daily cap', async t => {
   const instance = setup(t)
   assert.equal((await instance.discovery.start('scheduled')).outcome, 'waiting')
   assert.deepEqual(instance.calls(), [])
@@ -86,7 +90,29 @@ test('runs early when an interest appears, records a source, and shares the dail
   assert.equal(item.status, 'imported')
   assert.equal(instance.state.feedback(item.id, -1), true)
   assert.deepEqual(instance.state.recentFeedback().map(row => ({ ...row })), [{ topic: '日落人像', feedback: -1 }])
-  assert.equal((await instance.discovery.start('manual')).outcome, 'daily-limit')
+  assert.equal(instance.state.automaticCount('2026-11-13'), 1)
+  assert.equal((await instance.discovery.start('scheduled')).outcome, 'daily-limit')
+  assert.equal((await instance.discovery.start('manual')).outcome, 'no-match')
+  assert.equal(instance.state.automaticCount('2026-11-13'), 1)
+  assert.equal((await instance.discovery.start('manual')).outcome, 'no-match')
+})
+
+test('summarizes selected inactive conversation excerpts once per exploration', async t => {
+  const instance = setup(t, { conversationMessages: ['我想练人像摄影', '最近试 Lightroom 调色'] })
+  instance.setTime('2026-11-14T01:01:00Z')
+  assert.equal((await instance.discovery.start('manual')).outcome, 'complete')
+  assert.deepEqual(instance.calls(), ['summary', 'topic', 'search', 'select'])
+  assert.equal((await instance.discovery.start('manual')).outcome, 'no-match')
+  assert.deepEqual(instance.calls(), ['summary', 'topic', 'search', 'select', 'summary', 'topic', 'search'])
+})
+
+test('moderated conversation summary stops exploration before topic selection', async t => {
+  const instance = setup(t, { conversationMessages: ['想学习人像摄影'], moderateAt: 'summary' })
+  assert.equal((await instance.discovery.start('manual')).outcome, 'blocked')
+  assert.equal(instance.state.latest().details.stage, 'summary')
+  assert.deepEqual(instance.calls(), ['summary'])
+  assert.equal((await instance.discovery.start('manual')).outcome, 'blocked')
+  assert.deepEqual(instance.calls(), ['summary'])
 })
 
 test('runs at the fallback time and deduplicates the same source on the next local date', async t => {
