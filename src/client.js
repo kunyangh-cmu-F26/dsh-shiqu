@@ -49,6 +49,9 @@ window.__ModuleLoader__.load({
       if (!response.ok) {
         const error = new Error(typeof result.error === 'string' ? result.error : `拾趣请求失败（HTTP ${response.status} · ${path}）。`)
         error.status = response.status
+        error.code = result.code
+        error.reason = result.reason
+        error.hint = result.hint
         throw error
       }
       return result
@@ -66,18 +69,22 @@ window.__ModuleLoader__.load({
       return title ? title + ' · ' + id.replace(/^session-/, '').slice(0, 8) : id
     }
 
+    function errorText(error) {
+      return [error.message, error.hint, error.reason ?? error.code].filter(Boolean).join(' ')
+    }
+
     function Section() {
       const [snapshot, setSnapshot] = useState(null)
       const [settings, setSettings] = useState(null)
       const [sessions, setSessions] = useState(null)
-      const [loadError, setLoadError] = useState('')
+      const [loadError, setLoadError] = useState(null)
       const [sessionError, setSessionError] = useState('')
       const [diagnostics, setDiagnostics] = useState(null)
       const [notice, setNotice] = useState('')
       const [working, setWorking] = useState(false)
       const [researching, setResearching] = useState(false)
       const [saveStatus, setSaveStatus] = useState('')
-      const panel = useRef({ token: undefined, mounted: false })
+      const panel = useRef({ token: undefined, mounted: false, retry: undefined })
       const draft = useRef({ settings: null, revision: 0, savedRevision: 0, timer: undefined, pending: undefined })
       const saveQueue = useRef(Promise.resolve())
       const [subscriptionType, setSubscriptionType] = useState('github')
@@ -88,7 +95,7 @@ window.__ModuleLoader__.load({
         if (panel.current.mounted) {
           panel.current.token = current.panelToken
           setSnapshot(current)
-          setLoadError('')
+          setLoadError(null)
           if (!draft.current.settings) {
             draft.current.settings = current.settings
             setSettings(current.settings)
@@ -116,14 +123,17 @@ window.__ModuleLoader__.load({
         let active = true
         let loading = false
         let listed = false
-        async function load() {
+        async function load(reloadSessions = false) {
           if (loading) return
           loading = true
           try {
-            await refresh()
-            if (active && !listed) listed = await refreshSessions()
-          } catch (error) {
-            if (active) setLoadError(error.message)
+            try {
+              await refresh()
+            } catch (error) {
+              if (active) setLoadError(error)
+              if (error.code !== 'SHIQU_STORAGE_UNAVAILABLE') return
+            }
+            if (active && (!listed || reloadSessions)) listed = await refreshSessions()
           } finally {
             loading = false
           }
@@ -131,8 +141,9 @@ window.__ModuleLoader__.load({
         function saveBeforeClosing() {
           if (draft.current.timer !== undefined) flushSettings().catch(() => undefined)
         }
+        panel.current.retry = () => load(true)
         void load()
-        const timer = setInterval(load, statePollMs)
+        const timer = setInterval(() => load(), statePollMs)
         window.addEventListener?.('pagehide', saveBeforeClosing)
         return () => {
           active = false
@@ -151,7 +162,7 @@ window.__ModuleLoader__.load({
           if (message) setNotice(message)
           await refresh()
         } catch (error) {
-          setNotice(error.message)
+          setNotice(errorText(error))
         } finally {
           setWorking(false)
         }
@@ -202,7 +213,7 @@ window.__ModuleLoader__.load({
           current.savedRevision = revision
           showSaveStatus('设置已保存。')
         }).catch(error => {
-          showSaveStatus('保存失败：' + error.message)
+          showSaveStatus('保存失败：' + errorText(error))
           throw error
         }).finally(() => {
           if (current.pending?.revision === revision) current.pending = undefined
@@ -212,7 +223,21 @@ window.__ModuleLoader__.load({
         return promise
       }
 
-      if (!snapshot || !settings) return h('p', { role: 'status' }, loadError || '正在加载拾趣…')
+      const recovery = loadError && h('section', { style: card, 'aria-label': '拾趣故障恢复' },
+        h('p', { role: 'status' }, loadError.message),
+        loadError.hint && h('p', null, loadError.hint),
+        loadError.code && h('code', null, [loadError.code, loadError.reason].filter(Boolean).join(' · ')),
+        button('重试连接', () => panel.current.retry?.()),
+        loadError.code === 'SHIQU_STORAGE_UNAVAILABLE' && h('div', null,
+          h('strong', null, '会话列表（只读）'),
+          sessionError && h('p', { role: 'status' }, sessionError),
+          sessions === null ? h('p', null, sessionError ? '暂时无法列出会话。' : '正在加载会话…')
+            : sessions.length ? h('ul', { style: { maxHeight: 210, overflowY: 'auto' } },
+              sessions.map(session => h('li', { key: session.id }, sessionLabel(session))))
+              : h('p', null, '没有可选会话。')))
+      if (loadError?.code === 'SHIQU_STORAGE_UNAVAILABLE' || !snapshot || !settings) {
+        return recovery || h('p', { role: 'status' }, '正在加载拾趣…')
+      }
       const post = (path, body) => api(path, body, panel.current.token)
       const last = snapshot.latest
       const sessionList = sessions ?? []
@@ -266,7 +291,7 @@ window.__ModuleLoader__.load({
             h('span', { role: 'status', 'aria-live': 'polite' }, notice))),
         h('section', { style: card, 'aria-label': '设置' },
           h('strong', null, '设置'),
-          loadError && h('p', { role: 'status' }, loadError),
+          recovery,
           h('div', { style: row }, check('开启自动研究', 'enabled'), check('允许相邻主题', 'explore'),
             check('使用 DSH 网页搜索', 'webSearch')),
           field('每日兜底时间', { type: 'time', value: settings.fallbackAt,

@@ -9,14 +9,14 @@
 把拾趣和 Engram 安装到同一个 profile。Desktop 用户用应用菜单里的「管理 dsh 命令」注册 Desktop 内置命令，完全退出 Desktop 后，在安装包所在的目录执行：
 
 ```sh
-dsh plugin --profile desktop add ./dsh-shiqu-0.1.6.tgz
+dsh plugin --profile desktop add ./dsh-shiqu-0.1.7.tgz
 ```
 
 没有记忆宫殿时，在同一 profile 安装 `@kenz1117/dsh-engram@0.13.10`。单独启动 DSH Web 的用户用以下命令：
 
 ```sh
 dsh plugin --profile web add @kenz1117/dsh-engram@0.13.10
-dsh plugin --profile web add ./dsh-shiqu-0.1.6.tgz
+dsh plugin --profile web add ./dsh-shiqu-0.1.7.tgz
 ```
 
 重启 DSH，进入 **设置 → 拾趣**。如果 Engram 初装报 `ERR_PNPM_IGNORED_BUILDS`，请按 [Engram 的安装说明](https://github.com/kenz1117/dsh-engram#readme) 处理该依赖的安装授权，再重试。若命令安装过文件但因故未激活插件，请在 DSH 插件管理中检查并启用已安装项。拾趣自己的 npm 包没有安装脚本。
@@ -31,9 +31,11 @@ dsh plugin --profile web add ./dsh-shiqu-0.1.6.tgz
 
 ## 设置页排障
 
-v0.1.6 先注册 Host 接口，再打开数据库。数据文件无法打开时，设置接口会提示检查 `knowledge.sqlite`，会话列表仍可由 Host 提供。设置页会自动重试暂时失败的请求，也可用「刷新会话列表」读取刚创建的会话。
+v0.1.7 修复旧版 `runs` 表支持同一天多轮研究、但缺少 `trigger` 列时的升级错误（`no such column: trigger`）。首次打开旧库时，拾趣会自动补齐该列，保留设置、运行历史与收录记录。来源未知的历史运行按原有规则计入对应日期的自动配额。
 
-若提示 `HTTP 404`，检查 Desktop 插件管理中的拾趣版本和启用状态，从系统托盘退出整个 DSH 再打开。若提示无法打开数据文件，检查 Host 日志中 `knowledge.sqlite initialization failed` 的具体原因和数据目录的读写权限。升级会使用原有 `.dsh/shiqu/knowledge.sqlite`。
+数据文件无法打开时，拾趣设置页会显示错误码和处理提示，会话列表仍可只读查看。研究和保存暂停，原库留在原位。排除故障后可以点「重试连接」，设置页也会定期重试。
+
+若提示 `HTTP 404`，检查 Desktop 插件管理中的拾趣版本和启用状态，从系统托盘退出整个 DSH 再打开。升级或恢复前如需备份，从系统托盘完全退出 DSH，再复制整个 `shiqu` 目录到另一个位置，以便一起保留数据库及 SQLite 日志文件。
 
 ## 研究与收录
 
@@ -69,7 +71,7 @@ npm test
 npm pack
 ```
 
-`package.json` 和 `cordis.patch.yml` 分别定义 npm 包与 DSH 插件。手工安装文件是 `dsh-shiqu-0.1.6.tgz`。如果发布时使用自己的 npm scope，需同时更新 `package.json` 的包名、`cordis.patch.yml` 中插件行的 `name`，以及 `src/client.js` 注册的浏览器模块 ID。独立的设置页和数据目录仍使用 `dsh-shiqu` / `shiqu`。
+`package.json` 和 `cordis.patch.yml` 分别定义 npm 包与 DSH 插件。手工安装文件是 `dsh-shiqu-0.1.7.tgz`。如果发布时使用自己的 npm scope，需同时更新 `package.json` 的包名、`cordis.patch.yml` 中插件行的 `name`，以及 `src/client.js` 注册的浏览器模块 ID。独立的设置页和数据目录仍使用 `dsh-shiqu` / `shiqu`。
 
 可将源代码放进新 GitHub 仓库，添加 `dsh-plugin` 和 `deepseek-harness` topics，再发带 tarball 的 GitHub Release。拥有发布命名空间后，也可运行 `npm publish --access public`。发布前确认仓库里只有源码、文档和测试。
 

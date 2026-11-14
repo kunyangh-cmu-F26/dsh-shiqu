@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { test } from 'node:test'
-import { openState } from '../src/state.js'
+import { describeStorageError, openState } from '../src/state.js'
 import { defaults, DEFAULT_MAX_TOKENS, validateSettings } from '../src/settings.js'
 import { chooseTopic, summarizeConversations } from '../src/research.js'
 
@@ -71,4 +71,66 @@ test('migrates legacy one-run-per-day database without deleting research history
   state.finish(manual, 'no-match')
   assert.equal(state.automaticCount(day), 1)
   assert.equal(state.latest().trigger, 'manual')
+})
+
+test('adds the trigger column to existing multi-run history and preserves settings', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'shiqu-test-'))
+  const path = join(dir, 'knowledge.sqlite')
+  try {
+    using original = new DatabaseSync(path)
+    original.exec(`
+      CREATE TABLE runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        day TEXT NOT NULL, started INTEGER NOT NULL, outcome TEXT NOT NULL, details TEXT NOT NULL
+      );
+      CREATE TABLE settings (id INTEGER PRIMARY KEY CHECK(id = 1), value TEXT NOT NULL);
+    `)
+    original.prepare('INSERT INTO settings VALUES (1, ?)').run('{"tokenBudget":12000}')
+    const insert = original.prepare('INSERT INTO runs VALUES (?, ?, ?, ?, ?)')
+    insert.run(20, day, start, 'complete', '{"topic":"摄影"}')
+    insert.run(21, day, start + 1, 'failed', '{"code":"max-tokens"}')
+
+    const migrated = openState(path)
+    try {
+      assert.equal(migrated.settings().tokenBudget, 12000)
+      assert.deepEqual(migrated.recentTopics(), ['摄影'])
+      assert.equal(migrated.automaticCount(day), 2)
+      assert.equal(migrated.latest().id, 21)
+      assert.equal(migrated.latest().trigger, 'legacy')
+      assert.equal(migrated.latest().details.code, 'max-tokens')
+      const manual = migrated.claim(day, start + 2, 'manual', 1)
+      assert.ok(manual > 21)
+      migrated.finish(manual, 'complete')
+    } finally {
+      migrated.close()
+    }
+
+    const reopened = openState(path)
+    try {
+      assert.equal(reopened.latest().trigger, 'manual')
+      assert.equal(reopened.automaticCount(day), 2)
+    } finally {
+      reopened.close()
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('storage error details classify failures without exposing filesystem paths', () => {
+  const cases = [
+    [{ errcode: 1, message: 'no such column: trigger' }, 'SQLITE_SCHEMA'],
+    [{ errcode: 517 }, 'SQLITE_BUSY'],
+    [{ errcode: 14 }, 'SQLITE_ACCESS'],
+    [{ code: 'EACCES', message: 'denied at C:\\private' }, 'SQLITE_ACCESS'],
+    [{ errcode: 26 }, 'SQLITE_INVALID'],
+    [{ errcode: 13 }, 'SQLITE_FULL'],
+    [{ code: 'SHIQU_SQLITE_UNAVAILABLE' }, 'SQLITE_UNAVAILABLE'],
+    [{ errcode: 1, message: 'other failure' }, 'SQLITE_INIT_FAILED'],
+  ]
+  for (const [error, reason] of cases) {
+    const diagnostic = describeStorageError(error)
+    assert.equal(diagnostic.reason, reason)
+    assert.doesNotMatch(diagnostic.hint, /private/)
+  }
 })

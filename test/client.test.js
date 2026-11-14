@@ -75,6 +75,7 @@ function mountSettings(fetchReply) {
 
 function collectText(node) {
   if (typeof node === 'string' || typeof node === 'number') return String(node)
+  if (Array.isArray(node)) return node.map(collectText).join('')
   if (!node || typeof node !== 'object') return ''
   return (node.children ?? []).map(collectText).join('')
 }
@@ -135,6 +136,32 @@ test('panel recovers after state and session requests fail during Host startup',
   const panel = await client.render()
   assert.doesNotMatch(collectText(panel), /HTTP 404/)
   assert.ok(findNode(panel, node => node.type === 'option' && node.props.value === 'session-cold'))
+})
+
+test('storage failures show a safe diagnostic and read-only sessions until retry succeeds', async () => {
+  let storageReady = false
+  const client = mountSettings(async path => {
+    if (path.endsWith('/state')) {
+      if (storageReady) return Response.json({ settings: defaults, history: [], panelToken: 'token' })
+      return Response.json({
+        error: '无法打开 knowledge.sqlite',
+        code: 'SHIQU_STORAGE_UNAVAILABLE',
+        reason: 'SQLITE_SCHEMA',
+        hint: '数据库表结构与当前插件不匹配。',
+      }, { status: 503 })
+    }
+    assert.match(path, /\/sessions$/)
+    return Response.json({ sessions: [{ id: 'session-cold', title: '影像笔记' }] })
+  })
+  const recovery = await client.render()
+  assert.match(collectText(recovery), /SQLITE_SCHEMA/)
+  assert.match(collectText(recovery), /会话列表（只读）.*影像笔记/)
+  assert.doesNotMatch(collectText(recovery), /立即研究/)
+  storageReady = true
+  await findNode(recovery, node => node.type === 'button' && collectText(node) === '重试连接').props.onClick()
+  const restored = await client.render()
+  assert.match(collectText(restored), /立即研究/)
+  assert.doesNotMatch(collectText(restored), /SQLITE_SCHEMA/)
 })
 
 test('manual research flushes the latest settings before starting and closing flushes pending changes', async () => {

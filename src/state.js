@@ -5,6 +5,29 @@ import { defaults, validateSettings } from './settings.js'
 const DAY = 86_400_000
 const TEN_MINUTES = 600_000
 
+export function describeStorageError(error) {
+  if (error.code === 'SHIQU_SQLITE_UNAVAILABLE') {
+    return { reason: 'SQLITE_UNAVAILABLE', hint: '当前 DSH Host 缺少 SQLite 支持，请确认 Desktop 安装完整。' }
+  }
+  const sqliteCode = Number.isInteger(error.errcode) ? error.errcode & 0xff : undefined
+  if (sqliteCode === 5 || sqliteCode === 6) {
+    return { reason: 'SQLITE_BUSY', hint: '数据库正在被占用。关闭其他 DSH 实例或数据库工具后重试。' }
+  }
+  if ([8, 14].includes(sqliteCode) || ['EACCES', 'EPERM', 'ENOENT', 'ENOTDIR', 'EISDIR'].includes(error.code)) {
+    return { reason: 'SQLITE_ACCESS', hint: '无法访问数据库文件或目录。确认 knowledge.sqlite 是文件，且 DSH 可读写 shiqu 目录。' }
+  }
+  if (sqliteCode === 11 || sqliteCode === 26) {
+    return { reason: 'SQLITE_INVALID', hint: 'SQLite 无法识别或校验此数据库。请保留原文件，并从已知可用的备份副本排查。' }
+  }
+  if (sqliteCode === 1 && /^(?:no such (?:column|table):|table .* has no column named)/i.test(error.message)) {
+    return { reason: 'SQLITE_SCHEMA', hint: '数据库表结构与当前插件不匹配。请保留原文件，并记录插件版本和错误码。' }
+  }
+  if (sqliteCode === 13 || error.code === 'ENOSPC') {
+    return { reason: 'SQLITE_FULL', hint: '数据库所在磁盘空间不足。释放空间后重试。' }
+  }
+  return { reason: 'SQLITE_INIT_FAILED', hint: '数据库初始化失败。请保留原文件，并记录插件版本和错误码。' }
+}
+
 function ensureRunSchema(db) {
   // Versions <=0.1.3 used day as the primary key, which prevented multiple runs in one day.
   // Preserve their history atomically. Legacy runs count against today's automatic quota.
@@ -29,6 +52,9 @@ function ensureRunSchema(db) {
         day TEXT NOT NULL, started INTEGER NOT NULL, outcome TEXT NOT NULL,
         details TEXT NOT NULL, trigger TEXT NOT NULL DEFAULT 'scheduled'
       )`)
+    } else if (!columns.some(column => column.name === 'trigger')) {
+      // Some existing multi-run databases predate trigger tracking.
+      db.exec("ALTER TABLE runs ADD COLUMN trigger TEXT NOT NULL DEFAULT 'legacy'")
     }
     db.exec('CREATE INDEX IF NOT EXISTS runs_day_trigger ON runs(day, trigger)')
     db.exec('COMMIT')
@@ -40,7 +66,9 @@ function ensureRunSchema(db) {
 
 export function openState(file) {
   const sqlite = process.getBuiltinModule('node:sqlite')
-  if (!sqlite) throw new Error('The DSH Host runtime does not provide node:sqlite')
+  if (!sqlite) {
+    throw Object.assign(new Error('The DSH Host runtime does not provide node:sqlite'), { code: 'SHIQU_SQLITE_UNAVAILABLE' })
+  }
   if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true, mode: 0o700 })
   const db = new sqlite.DatabaseSync(file)
   try {
@@ -93,7 +121,7 @@ export function openState(file) {
     // they neither consume scheduled slots nor bypass the running-job lock.
     claim(day, started, trigger, dailyLimit) {
       const result = db.prepare(`INSERT INTO runs (day, started, outcome, details, trigger)
-        SELECT ?, ?, 'running', '{}', ? WHERE NOT EXISTS (
+      SELECT ?, ?, 'running', '{}', ? WHERE NOT EXISTS (
           SELECT 1 FROM runs WHERE outcome='running' AND started > ?
         ) AND (?='manual' OR (
           SELECT COUNT(*) FROM runs WHERE day=? AND trigger<>'manual'

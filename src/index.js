@@ -4,7 +4,7 @@ import { createDiscovery } from './discovery.js'
 import { engram } from './engram.js'
 import { registerPanel } from './panel.js'
 import { createSessionReader } from './sessions.js'
-import { openState } from './state.js'
+import { describeStorageError, openState } from './state.js'
 
 export const name = 'dsh-shiqu'
 // The settings panel must be available even if optional research services are
@@ -21,6 +21,7 @@ export function apply(ctx, config = {}) {
   ctx.effect(function* () {
     const lifetime = new AbortController()
     let services
+    let storageIssue
     let retryAt = 0
     const sessions = createSessionReader(ctx, { cursor: id => services.state.cursor(id) })
     let unregister
@@ -35,6 +36,7 @@ export function apply(ctx, config = {}) {
         state = openState(join(pluginHome, 'knowledge.sqlite'))
       } catch (error) {
         retryAt = Date.now() + STORAGE_RETRY_INTERVAL
+        storageIssue = describeStorageError(error)
         ctx.logger.warn('dsh-shiqu: knowledge.sqlite initialization failed: %s', error.message)
         return undefined
       }
@@ -44,6 +46,7 @@ export function apply(ctx, config = {}) {
         shutdown: lifetime.signal,
       })
       services = { state, discovery }
+      storageIssue = undefined
       return services
     }
 
@@ -58,7 +61,9 @@ export function apply(ctx, config = {}) {
       }
     }
 
-    unregister = registerPanel(ctx.webServer, { getServices, sessions, shutdown: lifetime.signal, reportError })
+    unregister = registerPanel(ctx.webServer, {
+      getServices, getStorageIssue: () => storageIssue, sessions, shutdown: lifetime.signal, reportError,
+    })
     getServices()
     timer = setInterval(() => {
       getServices()?.discovery.start('scheduled').catch(error => {

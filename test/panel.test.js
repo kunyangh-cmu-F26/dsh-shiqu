@@ -8,9 +8,14 @@ test('Desktop can save settings and run research when its proxy removes Origin',
   let settings = { enabled: false }
   let runs = 0
   let storageAvailable = true
+  let readError
+  const reported = []
   const services = {
     state: {
-      settings: () => settings,
+      settings: () => {
+        if (readError) throw readError
+        return settings
+      },
       latest: () => null,
       history: () => [],
       automaticCount: () => 0,
@@ -26,8 +31,9 @@ test('Desktop can save settings and run research when its proxy removes Origin',
   }
   registerPanel({ register: route => { handle = route.handler } }, {
     getServices: () => storageAvailable ? services : undefined,
+    getStorageIssue: () => ({ reason: 'SQLITE_SCHEMA', hint: '数据库表结构与当前插件不匹配。' }),
     shutdown: new AbortController().signal,
-    reportError: (path, error) => assert.fail(`${path}: ${error}`),
+    reportError: (path, error) => reported.push([path, error]),
     sessions: {
       async list() { return [{ id: 'cold', title: '' }] },
       async diagnose() { return [{ id: 'cold', roles: ['interest'], status: 'readable', eventCount: 50, hasModel: true }] },
@@ -61,8 +67,15 @@ test('Desktop can save settings and run research when its proxy removes Origin',
   const unavailable = await request('state', 'GET')
   assert.equal(unavailable.status, 503)
   assert.equal(unavailable.body.code, 'SHIQU_STORAGE_UNAVAILABLE')
+  assert.equal(unavailable.body.reason, 'SQLITE_SCHEMA')
   assert.equal((await request('sessions', 'GET')).body.sessions[0].id, 'cold')
   assert.equal((await request('settings', 'POST', panel)).status, 503)
   storageAvailable = true
   assert.deepEqual((await request('state', 'GET')).body.settings, { enabled: true })
+  readError = new SyntaxError('private record')
+  const invalidRecord = await request('state', 'GET')
+  assert.equal(invalidRecord.status, 503)
+  assert.equal(invalidRecord.body.reason, 'SQLITE_RECORD_INVALID')
+  assert.doesNotMatch(JSON.stringify(invalidRecord.body), /private record/)
+  assert.deepEqual(reported, [['/state', readError]])
 })

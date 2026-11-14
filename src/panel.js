@@ -1,5 +1,6 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { localTime, SettingsError } from './settings.js'
+import { describeStorageError } from './state.js'
 
 const PATH = '/api/dsh-shiqu'
 const LOOPBACK = new Set(['127.0.0.1', '[::1]', 'localhost'])
@@ -41,6 +42,14 @@ function respond(res, status, data) {
 
 class RequestError extends Error {}
 
+function storageUnavailable(res, issue) {
+  respond(res, 503, {
+    error: '拾趣暂时无法读取或写入本地数据库 knowledge.sqlite。',
+    code: 'SHIQU_STORAGE_UNAVAILABLE',
+    ...issue,
+  })
+}
+
 async function readBody(req) {
   const chunks = []
   let length = 0
@@ -59,7 +68,7 @@ async function readBody(req) {
   return body
 }
 
-export function registerPanel(server, { getServices, sessions, shutdown, reportError }) {
+export function registerPanel(server, { getServices, getStorageIssue, sessions, shutdown, reportError }) {
   // Desktop removes Origin on its private proxy. Require the token returned by
   // the same-site JSON endpoint for writes on both surfaces.
   const panelToken = Buffer.from(randomBytes(32).toString('base64url'))
@@ -78,10 +87,7 @@ export function registerPanel(server, { getServices, sessions, shutdown, reportE
           return respond(res, 200, { sessions: await sessions.list(AbortSignal.any([shutdown, AbortSignal.timeout(5_000)])) })
         }
         const services = getServices()
-        if (!services) return respond(res, 503, {
-          error: '无法打开拾趣的数据文件 knowledge.sqlite。请检查 DSH Host 日志及 shiqu 数据目录的读写权限，然后重试。',
-          code: 'SHIQU_STORAGE_UNAVAILABLE',
-        })
+        if (!services) return storageUnavailable(res, getStorageIssue())
         const { state, discovery } = services
         if (readsState) {
           const settings = state.settings()
@@ -117,7 +123,19 @@ export function registerPanel(server, { getServices, sessions, shutdown, reportE
       } catch (error) {
         if (error instanceof RequestError) return respond(res, 400, { error: error.message })
         reportError(path, error)
-        return respond(res, 503, { error: '暂时无法完成操作，请查看宿主日志。' })
+        if (error.code === 'ERR_SQLITE_ERROR' && (readsState || path === '/settings' || path === '/feedback')) {
+          return storageUnavailable(res, describeStorageError(error))
+        }
+        if (readsState && (error instanceof SyntaxError || error instanceof SettingsError)) {
+          return storageUnavailable(res, {
+            reason: 'SQLITE_RECORD_INVALID',
+            hint: '拾趣无法读取已保存的设置或历史记录。请保留原文件，并记录插件版本和错误码。',
+          })
+        }
+        return respond(res, 503, {
+          error: '暂时无法完成操作。请重试。如果问题持续，请记录错误码。',
+          code: 'SHIQU_OPERATION_FAILED',
+        })
       }
     },
   })
