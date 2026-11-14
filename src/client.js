@@ -10,6 +10,7 @@ window.__ModuleLoader__.load({
       'research-session-unavailable': '研究会话暂不可用，请重新选择并保存。',
       'research-session-no-model': '请先在研究会话里选择一个模型，再回来启动研究。',
       'no-source': '请开启网页搜索或添加订阅', busy: '已有一轮在运行', interrupted: '上一轮中断',
+      'no-agent-tools': '请在 Agent 研究工具中启用网页搜索，或启用读取订阅并添加来源。',
     }
     const stages = {
       'engram-read': '读取记忆宫殿', topic: '提取研究主题', search: '搜索与订阅',
@@ -20,9 +21,32 @@ window.__ModuleLoader__.load({
       expired: '已过期', blocked: '入库被拦截',
     }
     const sourceLabels = { web: '网页搜索', github: 'GitHub Releases', feed: 'RSS / Atom' }
+    const toolStatuses = { ok: '完成', failed: '失败', blocked: '被拦截', rejected: '已拒绝', duplicate: '重复请求' }
+    const agentFallback = {
+      'no-tool-call': '模型未发起可执行的工具调用，已走常规搜索和订阅流程。',
+      'agent-unavailable': '工具调用暂不可用，已走常规搜索和订阅流程。',
+      'agent-timeout': '等待工具调用超时，已走常规搜索和订阅流程。',
+      'agent-tools-failed': '本轮工具调用未能读取来源，已走常规搜索和订阅流程。',
+    }
     const row = { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }
     const stack = { display: 'grid', gap: 16, maxWidth: 760, margin: '0 auto', padding: '12px 4px' }
     const card = { border: '1px solid var(--border, #8885)', borderRadius: 10, padding: 14, display: 'grid', gap: 10 }
+    const feedbackChoices = [{ label: '有用', value: 1 }, { label: '少找这类', value: -1 }]
+    const feedbackStyle = {
+      padding: '4px 12px', borderRadius: 8, border: '1px solid var(--dsw-alias-border-l2, #8886)',
+      background: 'transparent', color: 'inherit', font: 'inherit',
+    }
+    const selectedFeedbackStyle = {
+      ...feedbackStyle,
+      borderColor: 'var(--dsw-alias-state-business-primary, #5277dc)',
+      background: 'color-mix(in srgb, var(--dsw-alias-state-business-primary, #5277dc) 15%, transparent)',
+      fontWeight: 600,
+    }
+    const dimmedFeedbackStyle = {
+      ...feedbackStyle,
+      background: 'var(--dsw-alias-bg-module-platform, #8882)',
+      color: 'var(--dsw-alias-label-secondary, #686b73)',
+    }
     const statePollMs = 10_000
     const saveDelayMs = 700
 
@@ -57,9 +81,21 @@ window.__ModuleLoader__.load({
       return result
     }
 
-    const button = (label, onClick, disabled = false, pressed) => h('button', {
-      type: 'button', onClick, disabled, 'aria-pressed': pressed,
+    const button = (label, onClick, disabled = false) => h('button', {
+      type: 'button', onClick, disabled,
     }, label)
+
+    function feedbackButtons(current, disabled, onChange) {
+      return h('div', { style: row, role: 'group', 'aria-label': '收录反馈' },
+        feedbackChoices.map(({ label, value }) => {
+          const selected = current === value
+          return h('button', {
+            key: value, type: 'button', disabled, 'aria-pressed': selected,
+            style: selected ? selectedFeedbackStyle : current ? dimmedFeedbackStyle : feedbackStyle,
+            onClick: () => onChange(selected ? 0 : value),
+          }, label)
+        }))
+    }
 
     function field(label, props) {
       return h('label', { style: row }, h('span', null, label), h('input', props))
@@ -82,6 +118,7 @@ window.__ModuleLoader__.load({
       const [diagnostics, setDiagnostics] = useState(null)
       const [notice, setNotice] = useState('')
       const [working, setWorking] = useState(false)
+      const [pendingFeedback, setPendingFeedback] = useState(null)
       const [researching, setResearching] = useState(false)
       const [saveStatus, setSaveStatus] = useState('')
       const panel = useRef({ token: undefined, mounted: false, retry: undefined })
@@ -239,13 +276,27 @@ window.__ModuleLoader__.load({
         return recovery || h('p', { role: 'status' }, '正在加载拾趣…')
       }
       const post = (path, body) => api(path, body, panel.current.token)
+      async function saveFeedback(id, value) {
+        setPendingFeedback({ id, value })
+        try {
+          await act(async () => {
+            await post('/feedback', { id, value })
+            setSnapshot(current => ({
+              ...current, history: current.history.map(item => item.id === id ? { ...item, feedback: value } : item),
+            }))
+            return '反馈已保存。'
+          })
+        } finally {
+          setPendingFeedback(null)
+        }
+      }
       const last = snapshot.latest
       const sessionList = sessions ?? []
       const knownIds = new Set(sessionList.map(session => session.id))
       const allSessions = [...sessionList, ...settings.sessions.filter(id => !knownIds.has(id)).map(id => ({ id, title: '暂不可见' }))]
       const researchOptions = settings.researchSession && !knownIds.has(settings.researchSession)
         ? [...sessionList, { id: settings.researchSession, title: '暂不可见' }] : sessionList
-      const check = (label, key) => field(label, { type: 'checkbox', checked: settings[key],
+      const check = (label, key, disabled = false) => field(label, { type: 'checkbox', checked: settings[key], disabled,
         onChange: event => update(key, event.target.checked) })
       const save = () => flushSettings().catch(() => undefined)
       const diagnosticLabels = {
@@ -294,13 +345,27 @@ window.__ModuleLoader__.load({
           recovery,
           h('div', { style: row }, check('开启自动研究', 'enabled'), check('允许相邻主题', 'explore'),
             check('使用 DSH 网页搜索', 'webSearch')),
+          h('fieldset', null, h('legend', null, 'Agent 研究工具'),
+            check('让研究模型自动调用工具', 'agentResearch'),
+            check('允许 Agent 网页搜索', 'agentWebSearch', !settings.agentResearch || !settings.webSearch),
+            check('允许 Agent 读取已配置的订阅', 'agentSubscriptions', !settings.agentResearch),
+            field('每轮最多调用次数（1–6）', { type: 'number', min: 1, max: 6, step: 1,
+              disabled: !settings.agentResearch, value: settings.agentToolLimit,
+              onChange: event => update('agentToolLimit', event.target.value === '' ? '' : Number(event.target.value)) }),
+            h('small', null, '网页工具沿用 DSH 搜索开关。订阅工具可读取下方配置的 RSS、Atom 和 GitHub Releases。'),
+            last?.details.agent && h('div', null,
+              h('strong', null, '最近一轮工具调用'),
+              last.details.agent.fallback && h('p', null, agentFallback[last.details.agent.fallback]),
+              last.details.agent.toolCalls.length > 0 && h('ul', null, last.details.agent.toolCalls.map((call, index) =>
+                h('li', { key: index }, [call.tool, toolStatuses[call.status], Number.isInteger(call.sources) ? `${call.sources} 条新来源` : '']
+                  .filter(Boolean).join(' · ')))))),
           field('每日兜底时间', { type: 'time', value: settings.fallbackAt,
             onChange: event => update('fallbackAt', event.target.value) }),
           field('时区', { value: settings.timeZone, onChange: event => update('timeZone', event.target.value) }),
           field('每日自动研究次数（1–24）', { type: 'number', min: 1, max: 24, step: 1,
             value: settings.dailyLimit, onChange: event => update('dailyLimit', event.target.value === '' ? '' : Number(event.target.value)) }),
           h('fieldset', null, h('legend', null, '模型 Token 预算'),
-            h('div', null, '默认每次模型请求最多输出 8000 Token，主题选择和资料筛选分别使用该上限。'),
+            h('div', null, '默认每次模型请求最多输出 8000 Token。Agent 工具研究可能发起多次模型请求。'),
             h('label', { style: row },
               h('input', { type: 'checkbox', checked: settings.tokenBudget !== null,
                 onChange: event => update('tokenBudget', event.target.checked ? 8000 : null) }),
@@ -360,11 +425,8 @@ window.__ModuleLoader__.load({
             h('small', null, [item.topic, sourceLabels[item.source], entryStatus[item.status],
               item.published, new Date(item.added).toLocaleDateString()].filter(Boolean).join(' · ')),
             h('div', null, item.summary), h('small', null, '收录理由 · ' + item.reason),
-            h('div', { style: row },
-              button('有用', () => act(() => post('/feedback', { id: item.id, value: item.feedback === 1 ? 0 : 1 }).then(() => '反馈已保存。')),
-                working, item.feedback === 1),
-              button('少找这类', () => act(() => post('/feedback', { id: item.id, value: item.feedback === -1 ? 0 : -1 }).then(() => '反馈已保存。')),
-                working, item.feedback === -1)))) : h('div', null, '收录的资料会出现在这里。')))
+            feedbackButtons(pendingFeedback?.id === item.id ? pendingFeedback.value : item.feedback,
+              working, value => saveFeedback(item.id, value)))) : h('div', null, '收录的资料会出现在这里。')))
     }
 
     return {

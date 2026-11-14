@@ -21,7 +21,7 @@ function plainText(value, limit) {
   return privateExcerpt(value, limit)
 }
 
-function publicTopic(value) {
+export function publicTopic(value) {
   if (typeof value !== 'string' || value.length > 72 || /\bwww\.|\b[A-Za-z]:[\\/]|(?:身份证|验证码)/i.test(value)) return ''
   const topic = plainText(value, 72)
   return /^[\p{L}\p{N}][\p{L}\p{N}\p{M} .+#&/()_-]{1,71}$/u.test(topic) &&

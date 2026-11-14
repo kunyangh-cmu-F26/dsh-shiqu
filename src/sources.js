@@ -2,7 +2,7 @@ import { SaxesParser } from 'saxes'
 import { canonicalUrl } from './settings.js'
 import { isModeration, privateExcerpt } from './research.js'
 
-const SOURCE_LIMIT = 16
+export const SOURCE_LIMIT = 16
 const MAX_FEED_CHARS = 500_000
 const FRESH_UPDATE_MS = 30 * 86_400_000
 

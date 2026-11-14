@@ -1,5 +1,6 @@
 const MAX_SESSIONS = 12
 const MAX_SUBSCRIPTIONS = 12
+const MAX_AGENT_TOOL_CALLS = 6
 const SESSION_ID = /^[\w.:-]{1,160}$/
 
 export class SettingsError extends Error {}
@@ -14,6 +15,10 @@ export const defaults = Object.freeze({
   timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
   explore: true,
   webSearch: true,
+  agentResearch: false,
+  agentWebSearch: true,
+  agentSubscriptions: true,
+  agentToolLimit: 3,
   sessions: [],
   researchSession: '',
   subscriptions: [],
@@ -58,8 +63,14 @@ function validateSubscription(subscription) {
 
 export function validateSettings(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new SettingsError('配置格式错误。')
-  const { enabled, dailyLimit, tokenBudget, fallbackAt, timeZone, explore, webSearch, sessions, researchSession, subscriptions, provider, model } = { ...defaults, ...input }
-  if (![enabled, explore, webSearch].every(value => typeof value === 'boolean')) throw new SettingsError('配置开关格式错误。')
+  const { enabled, dailyLimit, tokenBudget, fallbackAt, timeZone, explore, webSearch, agentResearch, agentWebSearch,
+    agentSubscriptions, agentToolLimit, sessions, researchSession, subscriptions, provider, model } = { ...defaults, ...input }
+  if (![enabled, explore, webSearch, agentResearch, agentWebSearch, agentSubscriptions].every(value => typeof value === 'boolean')) {
+    throw new SettingsError('配置开关格式错误。')
+  }
+  if (!Number.isInteger(agentToolLimit) || agentToolLimit < 1 || agentToolLimit > MAX_AGENT_TOOL_CALLS) {
+    throw new SettingsError(`每轮 Agent 工具调用次数应为 1–${MAX_AGENT_TOOL_CALLS}。`)
+  }
   if (!Number.isInteger(dailyLimit) || dailyLimit < 1 || dailyLimit > 24) throw new SettingsError('每日自动研究次数应为 1–24。')
   if (tokenBudget !== null && (!Number.isInteger(tokenBudget) || tokenBudget < 512 || tokenBudget > 65_536)) {
     throw new SettingsError('Token 预算应为 512–65536，或关闭自定义以使用默认 8000。')
@@ -87,8 +98,10 @@ export function validateSettings(input) {
     const subscription = validateSubscription(raw)
     uniqueSubscriptions.set(`${subscription.type}:${subscription.value}`, subscription)
   }
-  return { enabled, dailyLimit, tokenBudget, fallbackAt, timeZone, explore, webSearch, sessions: [...new Set(sessions)], researchSession,
-    subscriptions: [...uniqueSubscriptions.values()], provider: provider.trim(), model: model.trim() }
+  return { enabled, dailyLimit, tokenBudget, fallbackAt, timeZone, explore, webSearch,
+    agentResearch, agentWebSearch, agentSubscriptions, agentToolLimit,
+    sessions: [...new Set(sessions)], researchSession, subscriptions: [...uniqueSubscriptions.values()],
+    provider: provider.trim(), model: model.trim() }
 }
 
 export function localTime(now, timeZone) {

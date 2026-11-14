@@ -117,6 +117,29 @@ function findNode(node, predicate) {
   }
 }
 
+test('Agent panel enables tool controls and saves the selected permissions and limit', async () => {
+  const writes = []
+  const client = mountSettings(async (path, request) => {
+    if (path.endsWith('/state')) return Response.json({ settings: defaults, history: [], panelToken: 'token' })
+    if (path.endsWith('/sessions')) return Response.json({ sessions: [] })
+    assert.match(path, /\/settings$/)
+    writes.push(JSON.parse(request.body))
+    return Response.json({ ok: true })
+  })
+  let tree = await client.render()
+  const permission = (tree, label) => findNode(tree, node => node.type === 'label'
+    && collectText(node) === label).children.find(node => node.type === 'input')
+  assert.equal(permission(tree, '允许 Agent 网页搜索').props.disabled, true)
+  permission(tree, '让研究模型自动调用工具').props.onChange({ target: { checked: true } })
+  tree = await client.render()
+  assert.equal(permission(tree, '允许 Agent 网页搜索').props.disabled, false)
+  permission(tree, '允许 Agent 网页搜索').props.onChange({ target: { checked: false } })
+  findNode(tree, node => node.type === 'input' && node.props.max === 6).props.onChange({ target: { value: '4' } })
+  await client.debounce()
+  assert.deepEqual(writes.map(({ agentResearch, agentWebSearch, agentToolLimit }) =>
+    [agentResearch, agentWebSearch, agentToolLimit]), [[true, false, 4]])
+})
+
 test('panel recovers after state and session requests fail during Host startup', async () => {
   let stateReady = false
   let sessionsReady = false
@@ -186,4 +209,57 @@ test('manual research flushes the latest settings before starting and closing fl
   client.close()
   await client.debounce()
   assert.equal(writes.at(-1)[1].tokenBudget, 13000)
+})
+
+test('discovery feedback highlights one choice, dims the other, and can be switched or cleared', async () => {
+  const id = 'item-1'
+  const writes = []
+  let feedback = 0
+  let resolveWrite
+  let rejectWrite = false
+  const client = mountSettings(async (path, request) => {
+    if (path.endsWith('/state')) return Response.json({
+      settings: defaults, panelToken: 'token',
+      history: [{ id, feedback, title: '摄影教程', source: 'web', status: 'imported', added: 1 }],
+    })
+    if (path.endsWith('/sessions')) return Response.json({ sessions: [] })
+    assert.match(path, /\/feedback$/)
+    const write = JSON.parse(request.body)
+    writes.push(write)
+    if (writes.length === 1) await new Promise(resolve => { resolveWrite = resolve })
+    if (rejectWrite) return Response.json({ error: '反馈保存失败。' }, { status: 503 })
+    feedback = write.value
+    return Response.json({ ok: true })
+  })
+  const getButton = (tree, label) => findNode(tree, node => node.type === 'button' && collectText(node) === label)
+  const choices = ['有用', '少找这类']
+  const verify = (tree, selected, saving = false) => {
+    const [useful, less] = choices.map(label => getButton(tree, label).props)
+    assert.deepEqual([useful['aria-pressed'], less['aria-pressed']], [selected === 1, selected === -1])
+    assert.deepEqual([useful.disabled, less.disabled], [saving, saving])
+    if (selected === 0) {
+      assert.equal(useful.style.background, less.style.background)
+    } else {
+      const [active, muted] = selected === 1 ? [useful, less] : [less, useful]
+      assert.match(active.style.background, /--dsw-alias-state-business-primary/)
+      assert.match(muted.style.color, /--dsw-alias-label-secondary/)
+    }
+  }
+
+  verify(await client.render(), 0)
+  const pending = getButton(await client.render(), '有用').props.onClick()
+  verify(await client.render(), 1, true)
+  resolveWrite()
+  await pending
+  verify(await client.render(), 1)
+  await getButton(await client.render(), '少找这类').props.onClick()
+  verify(await client.render(), -1)
+  await getButton(await client.render(), '少找这类').props.onClick()
+  verify(await client.render(), 0)
+  rejectWrite = true
+  await getButton(await client.render(), '有用').props.onClick()
+  const restored = await client.render()
+  verify(restored, 0)
+  assert.match(collectText(restored), /反馈保存失败/)
+  assert.deepEqual(writes, [1, -1, 0, 1].map(value => ({ id, value })))
 })

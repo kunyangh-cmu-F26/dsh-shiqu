@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { collectAgentSources, researchTools } from './agent-research.js'
 import { knowledgeId } from './engram.js'
 import { chooseTopic, isModeration, privateExcerpt, selectKnowledge, summarizeConversations } from './research.js'
 import { localTime } from './settings.js'
@@ -77,6 +78,8 @@ export function createDiscovery({ state, palace, sessions, host, now = Date.now,
     const settings = state.settings()
     if (!settings.enabled && trigger !== 'manual') return { outcome: 'disabled' }
     if (!settings.webSearch && settings.subscriptions.length === 0) return { outcome: 'no-source' }
+    const tools = researchTools(settings)
+    if (settings.agentResearch && !tools.length) return { outcome: 'no-agent-tools' }
     const started = now()
     const slot = localTime(started, settings.timeZone)
     const automaticCount = state.automaticCount(slot.day)
@@ -97,6 +100,7 @@ export function createDiscovery({ state, palace, sessions, host, now = Date.now,
     let topic
     let outcome
     let details = {}
+    let agentDetails
     try {
       if (state.pending().length > 0) {
         stage = 'import'
@@ -138,10 +142,26 @@ export function createDiscovery({ state, palace, sessions, host, now = Date.now,
           topic = plan.topic
           stage = 'search'
           fingerprint = undefined
-          const { sources, failed, filtered, attempted } = await collectSources(host.web, settings, plan, started,
-            url => state.hasUrl(url), signal)
+          const hasUrl = url => state.hasUrl(url)
+          let gathered
+          if (tools.length) {
+            fingerprint = inputDigest('agent-search', [plan, tools.map(tool => tool.name), settings.subscriptions])
+            if (state.wasBlocked(fingerprint)) throw previousBlock()
+            const agent = await collectAgentSources({
+              llm: host.llm, web: host.web, tools, route: reading.route, settings, plan, now: started, hasUrl, signal,
+            })
+            agentDetails = { toolCalls: agent.calls, ...(agent.fallback ? { fallback: agent.fallback } : {}) }
+            if (!agent.fallback) gathered = agent
+          }
+          fingerprint = undefined
+          const sourceSettings = settings.agentResearch ? {
+            webSearch: settings.webSearch && settings.agentWebSearch,
+            subscriptions: settings.agentSubscriptions ? settings.subscriptions : [],
+          } : settings
+          gathered ??= await collectSources(host.web, sourceSettings, plan, started, hasUrl, signal)
+          const { sources, failed, filtered, attempted } = gathered
           details = { ...details, failed, filtered, attempted }
-          if (!sources.length && filtered) {
+          if (filtered && (!sources.length || (agentDetails && !agentDetails.fallback))) {
             outcome = 'blocked'
             details.stage = 'search'
           } else if (!sources.length && failed === attempted) {
@@ -174,7 +194,8 @@ export function createDiscovery({ state, palace, sessions, host, now = Date.now,
       details = failure.details
     }
     if (details.imported && ['no-interest', 'no-match'].includes(outcome)) outcome = 'complete'
-    state.finish(runId, outcome, { ...details, ...(topic ? { topic } : {}), unreadable: reading.unreadable,
+    state.finish(runId, outcome, { ...details, ...(agentDetails ? { agent: agentDetails } : {}),
+      ...(topic ? { topic } : {}), unreadable: reading.unreadable,
       unreadableSessions: reading.unreadableSessions ?? [] })
     return { outcome }
   }

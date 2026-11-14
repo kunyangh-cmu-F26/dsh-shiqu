@@ -11,7 +11,7 @@ const start = Date.parse('2026-11-13T17:20:00Z')
 const route = { provider: 'fixture', model: 'fixture' }
 const signal = new AbortController().signal
 
-function setup(t, { initialMessages = [], conversationMessages = [], moderateAt, failImport } = {}) {
+function setup(t, { initialMessages = [], conversationMessages = [], moderateAt, failImport, agent } = {}) {
   let time = start
   let messages = initialMessages
   let writes = 0
@@ -20,7 +20,7 @@ function setup(t, { initialMessages = [], conversationMessages = [], moderateAt,
   let profile = ['我最近想练日落人像']
   const state = openState(':memory:')
   t.after(() => state.close())
-  state.saveSettings({ enabled: true, fallbackAt: '17:00', timeZone: 'America/Los_Angeles' })
+  state.saveSettings({ enabled: true, fallbackAt: '17:00', timeZone: 'America/Los_Angeles', ...agent?.settings })
   const palace = {
     async readInterests() { return profile },
     async importItem() {
@@ -44,6 +44,11 @@ function setup(t, { initialMessages = [], conversationMessages = [], moderateAt,
   const host = {
     llm: {
       async *stream(options) {
+        if (options.tools) {
+          calls.push('agent')
+          yield* agent.stream(options)
+          return
+        }
         const selection = options.system.includes('候选网页摘要')
         const summary = options.system.includes('从指定的聊天记录中概括')
         calls.push(summary ? 'summary' : selection ? 'select' : 'topic')
@@ -61,11 +66,12 @@ function setup(t, { initialMessages = [], conversationMessages = [], moderateAt,
     },
     web: {
       async search({ query }) {
-        assert.equal(query, '日落人像 反光板')
+        assert.equal(query, agent?.query ?? '日落人像 反光板')
         calls.push('search')
         if (moderateAt === 'search') throw Object.assign(new Error('内容审查'), { code: 'content_filter' })
         return { sources: [{ url: 'https://example.com/guide?utm_source=one', title: '反光板实拍', snippet: '银色反光板补光' }] }
       },
+      fetch: agent?.fetch,
     },
   }
   const discovery = createDiscovery({ state, palace, sessions, host, now: () => time, shutdown: signal })
@@ -73,6 +79,90 @@ function setup(t, { initialMessages = [], conversationMessages = [], moderateAt,
     setTime(value) { time = Date.parse(value) }, setMessages(value) { messages = value },
     clearProfile() { profile = [] } }
 }
+
+function toolCall(name, id, args, index = 0) {
+  return { type: 'block-end', index, block: { type: 'tool-call', name, id, arguments: JSON.stringify(args) } }
+}
+
+test('Agent picks tools, receives tool results and sends supported evidence to Engram', async t => {
+  const subscriptionUrl = 'https://example.com/private-feed?key=private-key'
+  const instance = setup(t, { initialMessages: ['最近想练日落人像'], agent: {
+    settings: { agentResearch: true, agentToolLimit: 3, subscriptions: [{ type: 'feed', value: subscriptionUrl }] },
+    query: '逆光人像 实拍教程',
+    async fetch({ url }) {
+      assert.equal(url, subscriptionUrl)
+      return { statusCode: 200, body: { kind: 'text', content:
+        '<rss><channel><item><title>补光方法</title><link>https://example.com/fill</link><description>侧向补光实例</description></item></channel></rss>' } }
+    },
+    async *stream({ tools, messages }) {
+      assert.deepEqual(tools.map(tool => tool.name), ['shiqu_web_search', 'shiqu_read_subscription'])
+      assert.doesNotMatch(messages[0].content[0].text, /private-key|最近想练日落人像/)
+      if (messages.length === 1) {
+        yield toolCall('shiqu_web_search', 'first', { query: '逆光人像 实拍教程' })
+        yield { type: 'finish', reason: { kind: 'tool-calls' }, replayState: { response: 'fixture', blocks: [{}] } }
+      } else if (messages.length === 3) {
+        assert.equal(messages[1].source.replayState.response, 'fixture')
+        assert.equal(messages[2].toolCallId, 'first')
+        assert.match(messages[2].content[0].text, /银色反光板/)
+        yield toolCall('shiqu_read_subscription', 'second', { index: 1 })
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }
+      } else {
+        assert.equal(messages[4].toolCallId, 'second')
+        assert.match(messages[4].content[0].text, /侧向补光/)
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      }
+    },
+  } })
+  assert.equal((await instance.discovery.start('manual')).outcome, 'complete')
+  const agent = instance.state.latest().details.agent
+  assert.deepEqual(agent.toolCalls.map(({ tool, status }) => [tool, status]), [['网页搜索', 'ok'], ['读取订阅', 'ok']])
+  assert.equal(instance.writes(), 1)
+})
+
+test('invalid and disabled Agent tools exhaust the limit without executing and fall back to enabled sources', async t => {
+  const instance = setup(t, { agent: {
+    settings: { agentResearch: true, agentToolLimit: 2, agentSubscriptions: false,
+      subscriptions: [{ type: 'feed', value: 'https://example.com/feed' }] },
+    async fetch() { assert.fail('disabled subscription must stay disabled in fallback') },
+    async *stream({ tools }) {
+      assert.deepEqual(tools.map(tool => tool.name), ['shiqu_web_search'])
+      yield toolCall('shiqu_read_subscription', 'disabled', { index: 1 }, 0)
+      yield toolCall('shiqu_web_search', 'invalid', { query: 'https://example.com/' }, 1)
+      yield toolCall('shiqu_web_search', 'over-limit', { query: '不应执行' }, 2)
+      yield { type: 'finish', reason: { kind: 'tool-calls' } }
+    },
+  } })
+  assert.equal((await instance.discovery.start('manual')).outcome, 'complete')
+  assert.deepEqual(instance.calls(), ['topic', 'agent', 'search', 'select'])
+  assert.deepEqual(instance.state.latest().details.agent, {
+    toolCalls: [{ tool: '未启用的工具', status: 'rejected' }, { tool: '网页搜索', status: 'rejected' }],
+    fallback: 'no-tool-call',
+  })
+})
+
+test('moderation in the Agent model ends the research without conventional search', async t => {
+  const instance = setup(t, { agent: {
+    settings: { agentResearch: true },
+    async *stream() {
+      yield { type: 'finish', reason: { kind: 'error', failure: { code: 'content_filter', message: 'filtered' } } }
+    },
+  } })
+  assert.equal((await instance.discovery.start('manual')).outcome, 'blocked')
+  assert.equal(instance.state.latest().details.stage, 'search')
+  assert.deepEqual(instance.calls(), ['topic', 'agent'])
+})
+
+test('provider rejection of tools is recoverable through conventional search', async t => {
+  const instance = setup(t, { agent: {
+    settings: { agentResearch: true },
+    async *stream() {
+      yield { type: 'finish', reason: { kind: 'error', failure: { code: 'INVALID_REQUEST', message: 'tools unsupported' } } }
+    },
+  } })
+  assert.equal((await instance.discovery.start('manual')).outcome, 'complete')
+  assert.deepEqual(instance.calls(), ['topic', 'agent', 'search', 'select'])
+  assert.equal(instance.state.latest().details.agent.fallback, 'agent-unavailable')
+})
 
 test('runs early when an interest appears and manual research bypasses the daily cap', async t => {
   const instance = setup(t)
