@@ -1,11 +1,14 @@
 {
   "name": "dsh-shiqu",
-  "version": "0.1.4",
+  "version": "0.1.6",
   "description": "DSH 拾趣 — discover personal-interest knowledge and collect it in dsh-engram.",
   "type": "module",
   "license": "MIT",
   "author": "Kunyang Huang",
-  "engines": { "node": ">=24.9.0", "dsh": ">=0.2.1-rc.3 <0.2.2 || >=0.2.2-rc.1" },
+  "engines": {
+    "node": ">=24.9.0",
+    "dsh": ">=0.2.1-rc.3 <0.2.2 || >=0.2.2-rc.1"
+  },
   "main": "./src/index.js",
   "exports": {
     ".": "./src/index.js",
@@ -13,12 +16,38 @@
     "./package.json": "./package.json",
     "./cordis.patch.yml": "./cordis.patch.yml"
   },
-  "files": ["src/", "cordis.patch.yml", "README.md", "LICENSE"],
-  "keywords": ["dsh-plugin", "deepseek-harness", "dsh-engram", "rss", "knowledge"],
+  "files": [
+    "src/",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "dsh-engram",
+    "rss",
+    "knowledge"
+  ],
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" },
-    "client": { "platform": "web", "inject": ["slots"], "external": ["react"] }
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "slots"
+      ],
+      "external": [
+        "react"
+      ]
+    }
   },
-  "dependencies": { "saxes": "6.0.0" },
-  "scripts": { "test": "node --test", "check": "node --check src/client.js && node --test" }
+  "dependencies": {
+    "saxes": "6.0.0"
+  },
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check src/client.js && node --test"
+  }
 }

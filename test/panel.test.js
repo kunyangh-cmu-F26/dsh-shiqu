@@ -7,7 +7,8 @@ test('Desktop can save settings and run research when its proxy removes Origin',
   let handle
   let settings = { enabled: false }
   let runs = 0
-  registerPanel({ register: route => { handle = route.handler } }, {
+  let storageAvailable = true
+  const services = {
     state: {
       settings: () => settings,
       latest: () => null,
@@ -15,15 +16,21 @@ test('Desktop can save settings and run research when its proxy removes Origin',
       automaticCount: () => 0,
       saveSettings: next => { settings = next },
     },
-    sessions: {
-      async diagnose() { return [{ id: 'cold', roles: ['interest'], status: 'readable', eventCount: 50, hasModel: true }] },
-    },
     discovery: {
       busy: () => false,
       start: async () => {
         runs++
         return { outcome: 'complete' }
       },
+    },
+  }
+  registerPanel({ register: route => { handle = route.handler } }, {
+    getServices: () => storageAvailable ? services : undefined,
+    shutdown: new AbortController().signal,
+    reportError: (path, error) => assert.fail(`${path}: ${error}`),
+    sessions: {
+      async list() { return [{ id: 'cold', title: '' }] },
+      async diagnose() { return [{ id: 'cold', roles: ['interest'], status: 'readable', eventCount: 50, hasModel: true }] },
     },
   })
 
@@ -50,4 +57,12 @@ test('Desktop can save settings and run research when its proxy removes Origin',
   assert.equal((await request('run', 'POST', panel)).body.outcome, 'complete')
   assert.equal(runs, 1)
   assert.equal((await request('diagnose', 'POST', panel)).body.sessions[0].status, 'readable')
+  storageAvailable = false
+  const unavailable = await request('state', 'GET')
+  assert.equal(unavailable.status, 503)
+  assert.equal(unavailable.body.code, 'SHIQU_STORAGE_UNAVAILABLE')
+  assert.equal((await request('sessions', 'GET')).body.sessions[0].id, 'cold')
+  assert.equal((await request('settings', 'POST', panel)).status, 503)
+  storageAvailable = true
+  assert.deepEqual((await request('state', 'GET')).body.settings, { enabled: true })
 })

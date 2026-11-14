@@ -9,14 +9,14 @@
 把拾趣和 Engram 安装到同一个 profile。Desktop 用户用应用菜单里的「管理 dsh 命令」注册 Desktop 内置命令，完全退出 Desktop 后，在安装包所在的目录执行：
 
 ```sh
-dsh plugin --profile desktop add ./dsh-shiqu-0.1.4.tgz
+dsh plugin --profile desktop add ./dsh-shiqu-0.1.6.tgz
 ```
 
 没有记忆宫殿时，在同一 profile 安装 `@kenz1117/dsh-engram@0.13.10`。单独启动 DSH Web 的用户用以下命令：
 
 ```sh
 dsh plugin --profile web add @kenz1117/dsh-engram@0.13.10
-dsh plugin --profile web add ./dsh-shiqu-0.1.4.tgz
+dsh plugin --profile web add ./dsh-shiqu-0.1.6.tgz
 ```
 
 重启 DSH，进入 **设置 → 拾趣**。如果 Engram 初装报 `ERR_PNPM_IGNORED_BUILDS`，请按 [Engram 的安装说明](https://github.com/kenz1117/dsh-engram#readme) 处理该依赖的安装授权，再重试。若命令安装过文件但因故未激活插件，请在 DSH 插件管理中检查并启用已安装项。拾趣自己的 npm 包没有安装脚本。
@@ -25,9 +25,15 @@ dsh plugin --profile web add ./dsh-shiqu-0.1.4.tgz
 2. 在「兴趣来源」勾选允许读取的聊天会话。研究会话也可以勾选，勾选后它的聊天内容才参与选题。留空「研究会话」时，可手动填写后台模型，或沿用旧版从兴趣来源选择近期模型的方式。
 3. 设置每日兜底时间和时区。默认是本机时区的 17:00。比如湾区可填 `America/Los_Angeles`。
 4. 保留网页搜索，或添加 GitHub Releases（`owner/repo`）和 RSS/Atom（完整公开网址）。网页搜索沿用 DSH 已配置的搜索提供商及其凭据。
-5. 更改设置后约 0.7 秒自动保存，也可点「立即保存设置」。先用「检查已选会话读取状态」确认来源可读，再点「立即研究（不受每日上限限制）」。手动研究不占用每日自动配额，但已有研究正在运行时不能并发启动。
+5. 更改设置后约 0.7 秒自动保存，也可点「立即保存设置」。「检查已选会话读取状态」和「立即研究（不受每日上限限制）」都会先保存当前更改。手动研究不占用每日自动配额，但已有研究正在运行时不能并发启动。
 
 卸载时使用安装时的 profile，比如 Desktop 用 `dsh plugin --profile desktop remove dsh-shiqu`。本地收录历史和 Engram 已入库条目可分别保留和管理。
+
+## 设置页排障
+
+v0.1.6 先注册 Host 接口，再打开数据库。数据文件无法打开时，设置接口会提示检查 `knowledge.sqlite`，会话列表仍可由 Host 提供。设置页会自动重试暂时失败的请求，也可用「刷新会话列表」读取刚创建的会话。
+
+若提示 `HTTP 404`，检查 Desktop 插件管理中的拾趣版本和启用状态，从系统托盘退出整个 DSH 再打开。若提示无法打开数据文件，检查 Host 日志中 `knowledge.sqlite initialization failed` 的具体原因和数据目录的读写权限。升级会使用原有 `.dsh/shiqu/knowledge.sqlite`。
 
 ## 研究与收录
 
@@ -63,7 +69,7 @@ npm test
 npm pack
 ```
 
-`package.json` 和 `cordis.patch.yml` 分别定义 npm 包与 DSH 插件。手工安装文件是 `dsh-shiqu-0.1.4.tgz`。如果发布时使用自己的 npm scope，需同时更新 `package.json` 的包名、`cordis.patch.yml` 中插件行的 `name`，以及 `src/client.js` 注册的浏览器模块 ID。独立的设置页和数据目录仍使用 `dsh-shiqu` / `shiqu`。
+`package.json` 和 `cordis.patch.yml` 分别定义 npm 包与 DSH 插件。手工安装文件是 `dsh-shiqu-0.1.6.tgz`。如果发布时使用自己的 npm scope，需同时更新 `package.json` 的包名、`cordis.patch.yml` 中插件行的 `name`，以及 `src/client.js` 注册的浏览器模块 ID。独立的设置页和数据目录仍使用 `dsh-shiqu` / `shiqu`。
 
 可将源代码放进新 GitHub 仓库，添加 `dsh-plugin` 和 `deepseek-harness` topics，再发带 tarball 的 GitHub Release。拥有发布命名空间后，也可运行 `npm publish --access public`。发布前确认仓库里只有源码、文档和测试。
 

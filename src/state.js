@@ -1,18 +1,17 @@
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { DatabaseSync } from 'node:sqlite'
 import { defaults, validateSettings } from './settings.js'
 
 const DAY = 86_400_000
 const TEN_MINUTES = 600_000
 
 function ensureRunSchema(db) {
-  const columns = db.prepare('PRAGMA table_info(runs)').all()
   // Versions <=0.1.3 used day as the primary key, which prevented multiple runs in one day.
   // Preserve their history atomically. Legacy runs count against today's automatic quota.
-  if (columns.some(column => column.name === 'day' && column.pk === 1)) {
-    db.exec('BEGIN IMMEDIATE')
-    try {
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    const columns = db.prepare('PRAGMA table_info(runs)').all()
+    if (columns.some(column => column.name === 'day' && column.pk === 1)) {
       db.exec(`
         ALTER TABLE runs RENAME TO runs_legacy;
         CREATE TABLE runs (
@@ -24,37 +23,44 @@ function ensureRunSchema(db) {
           SELECT day, started, outcome, details, 'legacy' FROM runs_legacy;
         DROP TABLE runs_legacy;
       `)
-      db.exec('COMMIT')
-    } catch (error) {
-      db.exec('ROLLBACK')
-      throw error
+    } else if (!columns.length) {
+      db.exec(`CREATE TABLE runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        day TEXT NOT NULL, started INTEGER NOT NULL, outcome TEXT NOT NULL,
+        details TEXT NOT NULL, trigger TEXT NOT NULL DEFAULT 'scheduled'
+      )`)
     }
-  } else if (!columns.length) {
-    db.exec(`CREATE TABLE runs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      day TEXT NOT NULL, started INTEGER NOT NULL, outcome TEXT NOT NULL,
-      details TEXT NOT NULL, trigger TEXT NOT NULL DEFAULT 'scheduled'
-    )`)
+    db.exec('CREATE INDEX IF NOT EXISTS runs_day_trigger ON runs(day, trigger)')
+    db.exec('COMMIT')
+  } catch (error) {
+    db.exec('ROLLBACK')
+    throw error
   }
-  db.exec('CREATE INDEX IF NOT EXISTS runs_day_trigger ON runs(day, trigger)')
 }
 
 export function openState(file) {
+  const sqlite = process.getBuiltinModule('node:sqlite')
+  if (!sqlite) throw new Error('The DSH Host runtime does not provide node:sqlite')
   if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true, mode: 0o700 })
-  const db = new DatabaseSync(file)
-  db.exec(`
-    PRAGMA busy_timeout = 2000;
-    PRAGMA journal_mode = WAL;
-    CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK(id = 1), value TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS cursors (session TEXT PRIMARY KEY, seq INTEGER NOT NULL);
-    CREATE TABLE IF NOT EXISTS moderation (digest TEXT PRIMARY KEY, created INTEGER NOT NULL);
-    CREATE TABLE IF NOT EXISTS discoveries (
-      id TEXT PRIMARY KEY, url TEXT NOT NULL UNIQUE, topic TEXT NOT NULL, title TEXT NOT NULL,
-      summary TEXT NOT NULL, reason TEXT NOT NULL, category TEXT NOT NULL,
-      source TEXT NOT NULL, published TEXT, added INTEGER NOT NULL, status TEXT NOT NULL, feedback INTEGER NOT NULL DEFAULT 0
-    );
-  `)
-  ensureRunSchema(db)
+  const db = new sqlite.DatabaseSync(file)
+  try {
+    db.exec(`
+      PRAGMA busy_timeout = 2000;
+      PRAGMA journal_mode = WAL;
+      CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK(id = 1), value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS cursors (session TEXT PRIMARY KEY, seq INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS moderation (digest TEXT PRIMARY KEY, created INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS discoveries (
+        id TEXT PRIMARY KEY, url TEXT NOT NULL UNIQUE, topic TEXT NOT NULL, title TEXT NOT NULL,
+        summary TEXT NOT NULL, reason TEXT NOT NULL, category TEXT NOT NULL,
+        source TEXT NOT NULL, published TEXT, added INTEGER NOT NULL, status TEXT NOT NULL, feedback INTEGER NOT NULL DEFAULT 0
+      );
+    `)
+    ensureRunSchema(db)
+  } catch (error) {
+    db.close()
+    throw error
+  }
 
   return {
     settings() {

@@ -23,14 +23,34 @@ window.__ModuleLoader__.load({
     const row = { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }
     const stack = { display: 'grid', gap: 16, maxWidth: 760, margin: '0 auto', padding: '12px 4px' }
     const card = { border: '1px solid var(--border, #8885)', borderRadius: 10, padding: 14, display: 'grid', gap: 10 }
+    const statePollMs = 10_000
+    const saveDelayMs = 700
 
     async function api(path, body, panelToken) {
       const response = await fetch(prefix + path, body === undefined ? { cache: 'no-store' } : {
         method: 'POST', headers: { 'content-type': 'application/json', 'x-dsh-shiqu-panel-token': panelToken },
-        body: JSON.stringify(body),
+        body: JSON.stringify(body), keepalive: path === '/settings',
       })
-      const result = await response.json()
-      if (!response.ok) throw new Error(result.error)
+      // The Host's unmatched route can return plain text "not found", not JSON.
+      // Report the actual routing problem instead of a misleading JSON SyntaxError.
+      const raw = await response.text()
+      let result
+      try {
+        result = JSON.parse(raw)
+      } catch {
+        if (response.status === 404) {
+          throw new Error(`拾趣后台接口不存在（HTTP 404 · ${path}）。请检查 Desktop profile 中插件是否已启用、Host 是否成功加载，然后完全重启 DSH。`)
+        }
+        throw new Error(`拾趣后台响应不是 JSON（HTTP ${response.status} · ${path}）。请检查 DSH Host 日志。`)
+      }
+      if (!result || typeof result !== 'object' || Array.isArray(result)) {
+        throw new Error(`拾趣后台响应格式错误（HTTP ${response.status} · ${path}）。`)
+      }
+      if (!response.ok) {
+        const error = new Error(typeof result.error === 'string' ? result.error : `拾趣请求失败（HTTP ${response.status} · ${path}）。`)
+        error.status = response.status
+        throw error
+      }
       return result
     }
 
@@ -49,41 +69,77 @@ window.__ModuleLoader__.load({
     function Section() {
       const [snapshot, setSnapshot] = useState(null)
       const [settings, setSettings] = useState(null)
-      const [sessions, setSessions] = useState([])
+      const [sessions, setSessions] = useState(null)
+      const [loadError, setLoadError] = useState('')
+      const [sessionError, setSessionError] = useState('')
       const [diagnostics, setDiagnostics] = useState(null)
       const [notice, setNotice] = useState('')
       const [working, setWorking] = useState(false)
       const [researching, setResearching] = useState(false)
-      const [saving, setSaving] = useState(false)
-      const [revision, setRevision] = useState(0)
+      const [saveStatus, setSaveStatus] = useState('')
+      const panel = useRef({ token: undefined, mounted: false })
+      const draft = useRef({ settings: null, revision: 0, savedRevision: 0, timer: undefined, pending: undefined })
       const saveQueue = useRef(Promise.resolve())
-      const latestRevision = useRef(0)
       const [subscriptionType, setSubscriptionType] = useState('github')
       const [subscriptionValue, setSubscriptionValue] = useState('')
 
       async function refresh() {
         const current = await api('/state')
-        setSnapshot(current)
+        if (panel.current.mounted) {
+          panel.current.token = current.panelToken
+          setSnapshot(current)
+          setLoadError('')
+          if (!draft.current.settings) {
+            draft.current.settings = current.settings
+            setSettings(current.settings)
+          }
+        }
         return current
       }
 
+      async function refreshSessions() {
+        try {
+          const current = await api('/sessions')
+          if (!Array.isArray(current.sessions)) throw new Error('会话列表响应格式错误。')
+          if (!panel.current.mounted) return false
+          setSessions(current.sessions)
+          setSessionError('')
+          return true
+        } catch (error) {
+          if (panel.current.mounted) setSessionError(error.message)
+          return false
+        }
+      }
+
       useEffect(() => {
-        let mounted = true
-        api('/state').then(current => {
-          if (mounted) {
-            setSnapshot(current)
-            setSettings(current.settings)
+        panel.current.mounted = true
+        let active = true
+        let loading = false
+        let listed = false
+        async function load() {
+          if (loading) return
+          loading = true
+          try {
+            await refresh()
+            if (active && !listed) listed = await refreshSessions()
+          } catch (error) {
+            if (active) setLoadError(error.message)
+          } finally {
+            loading = false
           }
-        }).catch(error => { if (mounted) setNotice(error.message) })
-        api('/sessions').then(current => {
-          if (mounted) setSessions(current.sessions)
-        }).catch(error => { if (mounted) setNotice(error.message) })
-        const timer = setInterval(() => {
-          api('/state').then(current => { if (mounted) setSnapshot(current) }).catch(() => undefined)
-        }, 10_000)
+        }
+        function saveBeforeClosing() {
+          if (draft.current.timer !== undefined) flushSettings().catch(() => undefined)
+        }
+        void load()
+        const timer = setInterval(load, statePollMs)
+        window.addEventListener?.('pagehide', saveBeforeClosing)
         return () => {
-          mounted = false
+          active = false
+          panel.current.mounted = false
           clearInterval(timer)
+          window.removeEventListener?.('pagehide', saveBeforeClosing)
+          saveBeforeClosing()
         }
       }, [])
 
@@ -102,9 +158,13 @@ window.__ModuleLoader__.load({
       }
 
       function update(key, value) {
-        setSettings(current => ({ ...current, [key]: typeof value === 'function' ? value(current[key]) : value }))
-        latestRevision.current++
-        setRevision(latestRevision.current)
+        const current = draft.current
+        current.settings = { ...current.settings, [key]: typeof value === 'function' ? value(current.settings[key]) : value }
+        current.revision++
+        setSettings(current.settings)
+        setSaveStatus('有更改待保存。')
+        clearTimeout(current.timer)
+        current.timer = setTimeout(() => { flushSettings().catch(() => undefined) }, saveDelayMs)
       }
 
       function toggle(id) {
@@ -119,42 +179,50 @@ window.__ModuleLoader__.load({
         setSubscriptionValue('')
       }
 
-      function enqueueSave(value) {
-        saveQueue.current = saveQueue.current.catch(() => undefined)
-          .then(() => api('/settings', value, snapshot.panelToken))
-        return saveQueue.current
+      function flushSettings() {
+        const current = draft.current
+        clearTimeout(current.timer)
+        current.timer = undefined
+        const { revision, settings: value } = current
+        if (revision === current.savedRevision) return Promise.resolve()
+        if (current.pending?.revision === revision) return current.pending.promise
+
+        function showSaveStatus(message) {
+          if (panel.current.mounted && current.revision === revision) setSaveStatus(message)
+        }
+        showSaveStatus('正在保存…')
+        const promise = saveQueue.current.catch(() => undefined).then(async () => {
+          try {
+            await api('/settings', value, panel.current.token)
+          } catch (error) {
+            if (error.status !== 403 || !panel.current.mounted) throw error
+            const refreshed = await refresh()
+            await api('/settings', value, refreshed.panelToken)
+          }
+          current.savedRevision = revision
+          showSaveStatus('设置已保存。')
+        }).catch(error => {
+          showSaveStatus('保存失败：' + error.message)
+          throw error
+        }).finally(() => {
+          if (current.pending?.revision === revision) current.pending = undefined
+        })
+        current.pending = { revision, promise }
+        saveQueue.current = promise
+        return promise
       }
 
-      // Debounced, serialized saves prevent an older request from overwriting a newer change.
-      useEffect(() => {
-        if (!revision || !snapshot || !settings) return undefined
-        let cancelled = false
-        const timer = setTimeout(() => {
-          setSaving(true)
-          enqueueSave(settings).then(() => {
-            if (!cancelled && latestRevision.current === revision) setNotice('设置已自动保存。')
-          }).catch(error => {
-            if (!cancelled && latestRevision.current === revision) setNotice('自动保存失败：' + error.message)
-          }).finally(() => {
-            if (!cancelled && latestRevision.current === revision) setSaving(false)
-          })
-        }, 700)
-        return () => { cancelled = true; clearTimeout(timer) }
-      }, [revision])
-
-      if (!snapshot || !settings) return h('p', { role: 'status' }, notice || '正在加载拾趣…')
-      const post = (path, body) => api(path, body, snapshot.panelToken)
+      if (!snapshot || !settings) return h('p', { role: 'status' }, loadError || '正在加载拾趣…')
+      const post = (path, body) => api(path, body, panel.current.token)
       const last = snapshot.latest
-      const knownIds = new Set(sessions.map(session => session.id))
-      const allSessions = [...sessions, ...settings.sessions.filter(id => !knownIds.has(id)).map(id => ({ id, title: '暂不可见' }))]
+      const sessionList = sessions ?? []
+      const knownIds = new Set(sessionList.map(session => session.id))
+      const allSessions = [...sessionList, ...settings.sessions.filter(id => !knownIds.has(id)).map(id => ({ id, title: '暂不可见' }))]
       const researchOptions = settings.researchSession && !knownIds.has(settings.researchSession)
-        ? [...sessions, { id: settings.researchSession, title: '暂不可见' }] : sessions
+        ? [...sessionList, { id: settings.researchSession, title: '暂不可见' }] : sessionList
       const check = (label, key) => field(label, { type: 'checkbox', checked: settings[key],
         onChange: event => update(key, event.target.checked) })
-      const save = () => act(async () => {
-        await enqueueSave(settings)
-        return '设置已保存。'
-      })
+      const save = () => flushSettings().catch(() => undefined)
       const diagnosticLabels = {
         readable: '可读取', 'not-found': '会话不存在', 'reader-unavailable': '缺少读取服务',
         'read-failed': '读取失败', 'invalid-history': '历史记录无效',
@@ -162,6 +230,7 @@ window.__ModuleLoader__.load({
       }
       async function diagnose() {
         await act(async () => {
+          await flushSettings()
           const result = await post('/diagnose', {})
           setDiagnostics(result.sessions)
           return '会话检查完成（不激活会话）。'
@@ -171,6 +240,7 @@ window.__ModuleLoader__.load({
         setResearching(true)
         try {
           await act(async () => {
+            await flushSettings()
             const { outcome } = await post('/run', {})
             return statuses[outcome] ?? outcome
           })
@@ -187,6 +257,7 @@ window.__ModuleLoader__.load({
           last?.details.topic && h('div', null, '上次主题 · ' + last.details.topic),
           last?.details.stage && h('div', null, '阶段 · ' + (stages[last.details.stage] ?? last.details.stage)),
           last?.details.code && h('code', null, last.details.code),
+          last?.details.code === 'max-tokens' && h('small', null, '本次模型输出用尽了 Token 预算。可提高预算后重试。'),
           last?.details.filtered > 0 && h('div', null, '被拦截的来源 · ' + last.details.filtered),
           last?.details.failed > 0 && h('div', null, '读取失败的来源 · ' + last.details.failed),
           last?.details.unreadable > 0 && h('div', null, '暂时读不到的已选会话 · ' + last.details.unreadable),
@@ -195,6 +266,7 @@ window.__ModuleLoader__.load({
             h('span', { role: 'status', 'aria-live': 'polite' }, notice))),
         h('section', { style: card, 'aria-label': '设置' },
           h('strong', null, '设置'),
+          loadError && h('p', { role: 'status' }, loadError),
           h('div', { style: row }, check('开启自动研究', 'enabled'), check('允许相邻主题', 'explore'),
             check('使用 DSH 网页搜索', 'webSearch')),
           field('每日兜底时间', { type: 'time', value: settings.fallbackAt,
@@ -218,24 +290,27 @@ window.__ModuleLoader__.load({
               h('option', { value: '' }, '请选择研究会话'),
               researchOptions.map(session => h('option', { key: session.id, value: session.id }, sessionLabel(session))))),
             h('small', null, '在该会话中选择要用的模型。每轮研究会单独总结已选兴趣会话（包括可读取的非活跃会话），不会向这些聊天发送消息。'),
-            !settings.researchSession && h('details', { open: settings.provider ? true : undefined },
+            !settings.researchSession && h('details', { open: Boolean(settings.provider) || undefined },
               h('summary', null, '手动指定后台模型'),
               h('div', { style: row },
                 field('模型提供商 ID', { value: settings.provider,
                   onChange: event => update('provider', event.target.value) }),
                 field('模型 ID', { value: settings.model, onChange: event => update('model', event.target.value) })))),
           h('fieldset', null, h('legend', null, '兴趣来源 · 允许读取的会话'),
+            sessionError && h('p', { role: 'status' }, sessionError),
+            button('刷新会话列表', refreshSessions),
             allSessions.length ? h('div', { style: { ...stack, gap: 4, maxHeight: 210, overflowY: 'auto', margin: 0 } },
               allSessions.map(session => h('label', { key: session.id, style: row },
                 h('input', { type: 'checkbox', disabled: settings.sessions.length >= 12 && !settings.sessions.includes(session.id),
                   checked: settings.sessions.includes(session.id), onChange: () => toggle(session.id) }),
                 h('span', { title: session.id }, sessionLabel(session))))) :
-              h('p', null, '没有可选会话。先在 DSH 中创建会话，再重新打开此面板。')),
+              h('p', null, sessions ? '没有可选会话。创建会话后可以刷新列表。'
+                : sessionError ? '暂时无法列出会话。' : '正在加载会话…')),
           h('div', { style: row }, button('检查已选会话读取状态', diagnose, working || snapshot.busy),
             h('small', null, '可诊断非活跃会话；不发送聊天内容给面板。')),
           diagnostics && h('div', { role: 'status', style: { display: 'grid', gap: 4 } },
             diagnostics.length ? diagnostics.map(item => h('div', { key: item.id },
-              (sessions.find(session => session.id === item.id)?.title || item.id.slice(0, 12)),
+              (sessionList.find(session => session.id === item.id)?.title || item.id.slice(0, 12)),
               ' · ', diagnosticLabels[item.status] || item.status,
               item.status === 'readable' ? ` · ${item.eventCount} 条事件${item.hasModel ? '' : ' · 未发现模型'}` : '')) :
               '没有选中的会话。'),
@@ -251,8 +326,8 @@ window.__ModuleLoader__.load({
             h('ul', null, settings.subscriptions.map((subscription, index) =>
               h('li', { key: subscription.type + subscription.value + index },
                 subscription.value, ' ', button('移除', () => update('subscriptions', settings.subscriptions.filter((_, position) => position !== index))))))),
-          h('div', { style: row }, button('立即保存设置', save, working || saving),
-            h('small', null, saving ? '正在自动保存…' : '更改后约 0.7 秒自动保存'))),
+          h('div', { style: row }, button('立即保存设置', save, working),
+            h('small', { role: 'status' }, saveStatus || '更改后约 0.7 秒自动保存'))),
         h('section', { style: card, 'aria-label': '收录记录' },
           h('strong', null, '收录记录'),
           snapshot.history.length ? snapshot.history.map(item => h('article', { key: item.id, style: card },

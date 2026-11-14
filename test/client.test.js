@@ -1,0 +1,162 @@
+import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { test } from 'node:test'
+import vm from 'node:vm'
+import { defaults } from '../src/settings.js'
+
+const source = readFileSync(new URL('../src/client.js', import.meta.url), 'utf8')
+
+function mountSettings(fetchReply) {
+  let factory
+  let section
+  const state = []
+  let hook = 0
+  let effects = []
+  const timeouts = new Map()
+  let timerId = 0
+  let poll
+  let cleanups = []
+  let mounted = false
+  const React = {
+    createElement(type, props, ...children) { return { type, props, children } },
+    useState(initial) {
+      const index = hook++
+      if (!(index in state)) state[index] = initial
+      return [state[index], next => { state[index] = typeof next === 'function' ? next(state[index]) : next }]
+    },
+    useRef(value) {
+      const index = hook++
+      if (!(index in state)) state[index] = { current: value }
+      return state[index]
+    },
+    useEffect(fn) { hook++; effects.push(fn) },
+  }
+  vm.runInNewContext(source, {
+    window: { __ModuleLoader__: { load(module) { factory = module.factory } } },
+    fetch: fetchReply,
+    setInterval(callback) { poll = callback; return 1 },
+    clearInterval() {},
+    setTimeout(callback) { timeouts.set(++timerId, callback); return timerId },
+    clearTimeout(id) { timeouts.delete(id) },
+  }, { filename: 'client.js' })
+  const plugin = factory(name => {
+    assert.equal(name, 'react')
+    return React
+  })
+  plugin.apply({ get(name) {
+    assert.equal(name, 'slots')
+    return { inject(_, callback) { callback() }, register(_, component) { section = component } }
+  } })
+  return {
+    poll: () => poll(),
+    close: () => cleanups.forEach(cleanup => cleanup?.()),
+    async debounce() {
+      for (const [id, callback] of timeouts) {
+        timeouts.delete(id)
+        callback()
+      }
+      await new Promise(resolve => setImmediate(resolve))
+    },
+    async render() {
+      hook = 0
+      effects = []
+      section()
+      if (!mounted) {
+        cleanups = effects.map(effect => effect())
+        mounted = true
+      }
+      await new Promise(resolve => setImmediate(resolve))
+      hook = 0
+      effects = []
+      return section()
+    },
+  }
+}
+
+function collectText(node) {
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  if (!node || typeof node !== 'object') return ''
+  return (node.children ?? []).map(collectText).join('')
+}
+
+test('settings surface displays actionable Host-route diagnostics for plain-text 404', async () => {
+  const calls = []
+  const client = mountSettings(async path => {
+    calls.push(path)
+    return new Response('not found', { status: 404, headers: { 'content-type': 'text/plain' } })
+  })
+  const tree = await client.render()
+  assert.deepEqual(calls, ['/api/dsh-shiqu/state'])
+  assert.match(collectText(tree), /HTTP 404/)
+  assert.match(collectText(tree), /插件是否已启用/)
+  assert.doesNotMatch(collectText(tree), /Unexpected token/)
+})
+
+test('settings surface does not throw a JSON parsing error for non-JSON 503', async () => {
+  const client = mountSettings(async () => new Response('<html>error</html>', { status: 503 }))
+  const tree = await client.render()
+  assert.match(collectText(tree), /不是 JSON（HTTP 503/)
+})
+
+test('the plugin only requires the webServer service to expose settings', () => {
+  const entry = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8')
+  assert.match(entry, /export const inject = \['webServer'\]/)
+  assert.match(entry, /get llm\(\) \{ return ctx\.get\('llm'\) \}/)
+  assert.match(entry, /get web\(\) \{ return ctx\.get\('web'\) \}/)
+})
+
+function findNode(node, predicate) {
+  if (!node || typeof node !== 'object') return undefined
+  if (predicate(node)) return node
+  for (const child of node.children ?? []) {
+    for (const item of Array.isArray(child) ? child : [child]) {
+      const match = findNode(item, predicate)
+      if (match) return match
+    }
+  }
+}
+
+test('panel recovers after state and session requests fail during Host startup', async () => {
+  let stateReady = false
+  let sessionsReady = false
+  const client = mountSettings(async path => {
+    if (path.endsWith('/state')) return stateReady
+      ? Response.json({ settings: defaults, history: [], panelToken: 'token' })
+      : new Response('not found', { status: 404 })
+    return sessionsReady ? Response.json({ sessions: [{ id: 'session-cold', title: '影像笔记' }] })
+      : new Response('not found', { status: 404 })
+  })
+  assert.match(collectText(await client.render()), /HTTP 404 · \/state/)
+  stateReady = true
+  await client.poll()
+  assert.match(collectText(await client.render()), /HTTP 404 · \/sessions/)
+  sessionsReady = true
+  await client.poll()
+  const panel = await client.render()
+  assert.doesNotMatch(collectText(panel), /HTTP 404/)
+  assert.ok(findNode(panel, node => node.type === 'option' && node.props.value === 'session-cold'))
+})
+
+test('manual research flushes the latest settings before starting and closing flushes pending changes', async () => {
+  const writes = []
+  const client = mountSettings(async (path, request) => {
+    if (path.endsWith('/state')) return Response.json({ settings: { ...defaults, tokenBudget: 8000 }, history: [], panelToken: 'token' })
+    if (path.endsWith('/sessions')) return Response.json({ sessions: [] })
+    writes.push([path.split('/').at(-1), JSON.parse(request.body)])
+    return Response.json({ outcome: 'complete' })
+  })
+  let panel = await client.render()
+  const editBudget = (tree, value) => findNode(tree, node => node.type === 'input' && node.props.min === 512)
+    .props.onChange({ target: { value } })
+  editBudget(panel, '11000')
+  editBudget(panel, '12000')
+  await findNode(panel, node => node.type === 'button' && collectText(node).includes('立即研究')).props.onClick()
+  await client.debounce()
+  assert.deepEqual(writes.map(([path, body]) => [path, body.tokenBudget]),
+    [['settings', 12000], ['run', undefined]])
+  panel = await client.render()
+  editBudget(panel, '13000')
+  client.close()
+  await client.debounce()
+  assert.equal(writes.at(-1)[1].tokenBudget, 13000)
+})
